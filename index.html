@@ -110,6 +110,7 @@ label.sm{font-size:12px;color:var(--muted)}
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js"></script>
 <script>
 // Minimal FIT reader: returns record messages as [unix, lat, lon, alt, distM, kmh, hr, cad, pwr, temp]
 function parseFIT(buf){
@@ -382,7 +383,7 @@ function drawHud(){
   // rider
   if(ph.phase!=='intro'){
     const q=map.project([cur.lng,cur.lat]);const col=riderColor();
-    const pulse=(performance.now()/900)%1;
+    const pulse=((hudClock??performance.now())/900)%1;
     hg.beginPath();hg.arc(q.x,q.y,(9+pulse*16)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.35*(1-pulse)})`;hg.fill();
     hg.beginPath();hg.arc(q.x,q.y,8*s,0,7);hg.fillStyle='#fff';hg.fill();
     hg.beginPath();hg.arc(q.x,q.y,5.5*s,0,7);hg.fillStyle=col;hg.fill();
@@ -430,7 +431,6 @@ function drawHud(){
   hg.textAlign='right';hg.font=`400 ${9*s}px ${fb}`;hg.fillStyle='rgba(255,255,255,.45)';
   hg.fillText('Imagery © Esri, Maxar, Earthstar Geographics · Terrain © Mapzen / AWS',W-pad,H-6*s);
   if(ph.phase==='outro')drawSummary(s,fb,ph.u);
-  if(state.rec){hg.textAlign='left';hg.fillStyle='#ff5d5d';hg.beginPath();hg.arc(W-pad-5*s,pad+64*s,5*s,0,7);hg.fill()}
 }
 function drawProfile(x,y,w,h,s,fb){
   const P=RIDE.P,D=RIDE.dist,lo=RIDE.altMin,hi=RIDE.maxAlt,span=Math.max(50,hi-lo);
@@ -481,41 +481,70 @@ let lastFrame=performance.now();
 function frame(now){
   const dt=Math.min(.25,(now-lastFrame)/1000);lastFrame=now;
   if(RIDE&&overview){
-    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false);if(state.rec)stopRec()}
+    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false)}
       update(dt,false);syncUI();}
-    else if(cur)map.triggerRepaint&&pulseTick(now);
+    else if(cur&&!state.rec)pulseTick(now);
   }
   requestAnimationFrame(frame);
 }
-map.on('render',()=>{drawHud();if(state.rec)compose()});
+map.on('render',()=>drawHud());
 let lastPulse=0;function pulseTick(now){if(now-lastPulse>60){lastPulse=now;drawHud()}}
 function seek(T){state.T=Math.max(0,Math.min(total(),T));if(RIDE&&overview){update(0,true);syncUI()}}
 
-/* ---------------- recording ---------------- */
-let recCanvas,recCtx,recorder,chunks=[],downloads=null;
+/* ---------------- recording: frame-by-frame H.264 → standard MP4 ---------------- */
+let recCanvas,recCtx,downloads=null,hudClock=null;
 
-function compose(){const mc=map.getCanvas();if(recCanvas.width!==mc.width){recCanvas.width=mc.width;recCanvas.height=mc.height}
-  recCtx.drawImage(mc,0,0);recCtx.drawImage(hud,0,0,recCanvas.width,recCanvas.height)}
-function pickMime(){for(const m of['video/mp4;codecs=avc1.640028','video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm'])if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m))return m;return null}
-async function startRec(){
-  const mime=pickMime();if(!mime||!HTMLCanvasElement.prototype.captureStream){toast('這個瀏覽器不支援錄影，請改用電腦版 Chrome 或 Edge。');return}
-  const mc=map.getCanvas();recCanvas=document.createElement('canvas');recCanvas.width=mc.width;recCanvas.height=mc.height;recCtx=recCanvas.getContext('2d');
-  setPlaying(false);seek(0);toast('準備地圖中…');
-  await new Promise(r=>{if(map.loaded()&&map.areTilesLoaded())r();else map.once('idle',r)});
-  compose();
-  const stream=recCanvas.captureStream(30);recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:12e6});chunks=[];
-  recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
-  recorder.onstop=saveRec;recorder.start(500);
-  state.rec={mime};document.getElementById('rec').classList.add('on');document.getElementById('rectext').textContent='停止錄影';
-  setDock(false);toast('錄影中，播完會自動停止');setPlaying(true);
+function compose(){recCtx.drawImage(map.getCanvas(),0,0,recCanvas.width,recCanvas.height);recCtx.drawImage(hud,0,0,recCanvas.width,recCanvas.height)}
+const even=n=>Math.max(2,Math.round(n/2)*2);
+async function pickConfig(w,h){
+  for(const maxSide of [1920,1280,960]){
+    const k=Math.min(1,maxSide/Math.max(w,h)),W2=even(w*k),H2=even(h*k);
+    for(const codec of ['avc1.640028','avc1.4d0028','avc1.42002a','avc1.42001f']){
+      const cfg={codec,width:W2,height:H2,bitrate:Math.round(W2*H2*30*.18),framerate:30,avc:{format:'avc'}};
+      try{const r=await VideoEncoder.isConfigSupported(cfg);if(r.supported)return cfg}catch(e){}
+    }
+  }
+  return null;
 }
-function stopRec(){if(recorder&&recorder.state!=='inactive')recorder.stop();setPlaying(false)}
-async function saveRec(){
-  const mime=state.rec.mime;state.rec=null;document.getElementById('rec').classList.remove('on');document.getElementById('rectext').textContent='錄成影片';setDock(true);
-  const ext=mime.includes('mp4')?'mp4':'webm';const blob=new Blob(chunks,{type:mime.split(';')[0]});
-  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.${ext}`;
+function waitRender(){return new Promise(r=>{map.once('render',r);map.triggerRepaint()})}
+function waitIdle(ms){return new Promise(r=>{let done=false;const f=()=>{if(!done){done=true;r()}};map.once('idle',f);setTimeout(f,ms)})}
+function setRecUI(on,text){const b=document.getElementById('rec');b.classList.toggle('on',on);document.getElementById('rectext').textContent=text;setDock(!on)}
+async function startRec(){
+  if(!window.VideoEncoder||!window.VideoFrame||!window.Mp4Muxer){toast('這個瀏覽器不支援輸出影片，請改用最新版 Chrome、Edge 或 Safari。');return}
+  const mc=map.getCanvas();const cfg=await pickConfig(mc.width,mc.height);
+  if(!cfg){toast('這台裝置不支援 H.264 編碼，無法輸出 MP4。');return}
+  recCanvas=document.createElement('canvas');recCanvas.width=cfg.width;recCanvas.height=cfg.height;recCtx=recCanvas.getContext('2d');
+  setPlaying(false);state.rec={cancel:false};setRecUI(true,'取消輸出');
+  const target=new Mp4Muxer.ArrayBufferTarget();
+  const muxer=new Mp4Muxer.Muxer({target,video:{codec:'avc',width:cfg.width,height:cfg.height,frameRate:30},fastStart:'in-memory',firstTimestampBehavior:'offset'});
+  let encErr=null;
+  const enc=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>{encErr=e}});
+  enc.configure(cfg);
+  const fps=30,N=Math.ceil(total()*fps)+1;
+  try{
+    seek(0);await waitIdle(8000);
+    for(let i=0;i<N;i++){
+      if(state.rec.cancel||encErr)break;
+      state.T=Math.min(total(),i/fps);hudClock=i*1000/fps;update(1/fps,i===0);
+      await waitRender();
+      if(!map.areTilesLoaded()){await waitIdle(2500);await waitRender()}
+      compose();
+      const vf=new VideoFrame(recCanvas,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});
+      enc.encode(vf,{keyFrame:i%60===0});vf.close();
+      while(enc.encodeQueueSize>8)await new Promise(r=>setTimeout(r,5));
+      if(i%15===0){document.getElementById('rectext').textContent=`輸出中 ${Math.round(i/N*100)}%（取消）`;syncUI()}
+    }
+    await enc.flush();
+  }catch(e){encErr=e}
+  const cancelled=state.rec.cancel;hudClock=null;state.rec=null;setRecUI(false,'錄成影片');try{enc.close()}catch(e){}
+  if(encErr){toast('輸出失敗：'+(encErr.message||'編碼錯誤'));return}
+  if(cancelled){toast('已取消輸出');return}
+  muxer.finalize();
+  const blob=new Blob([target.buffer],{type:'video/mp4'});
+  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.mp4`;
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
+function stopRec(){if(state.rec)state.rec.cancel=true}
 function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open').forEach(el=>el.disabled=!on)}
 
 /* ---------------- UI ---------------- */
