@@ -56,6 +56,7 @@ input[type=range]{flex:1;min-width:80px;accent-color:var(--amber)}
 .seg button[aria-pressed=true]{background:#2b3542;color:var(--text)}
 label.sm{font-size:12px;color:var(--muted)}
 #title{width:150px}
+#ccolor{width:38px;height:34px;padding:2px;border:1px solid var(--line);border-radius:6px;background:#1f2731;cursor:pointer}
 #toast{position:absolute;left:50%;top:calc(14px + env(safe-area-inset-top,0px));transform:translateX(-50%);background:rgba(13,17,23,.92);border:1px solid var(--line);padding:8px 14px;border-radius:8px;font-size:13px;z-index:6;max-width:min(90%,520px);text-align:center}
 #drop{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:rgba(13,17,23,.82);border:2px dashed var(--amber);font-size:18px}
 @media (max-width:640px){#title{width:110px}.hide-sm{display:none}}
@@ -92,6 +93,11 @@ label.sm{font-size:12px;color:var(--muted)}
       <select id="dur"><option value="30">30 秒</option><option value="45">45 秒</option><option value="60" selected>60 秒</option><option value="90">90 秒</option><option value="120">2 分鐘</option></select>
       <label class="sm" for="aspect">比例</label>
       <select id="aspect"><option value="fill">填滿</option><option value="16:9">16:9</option><option value="9:16">9:16 直式</option><option value="1:1">1:1</option></select>
+    </div>
+    <div class="grp">
+      <label class="sm" for="cmode">路線</label>
+      <select id="cmode"><option value="solid">單色</option><option value="speed">依速度</option><option value="power">依功率</option></select>
+      <input type="color" id="ccolor" value="#ffb547" aria-label="路線顏色">
     </div>
     <div class="grp">
       <label class="sm hide-sm" for="title">標題</label>
@@ -193,8 +199,14 @@ function buildRide(segs){
   let minLat=90,maxLat=-90,minLng=180,maxLng=-180;
   for(const p of P){minLat=Math.min(minLat,p.lat);maxLat=Math.max(maxLat,p.lat);minLng=Math.min(minLng,p.lng);maxLng=Math.max(maxLng,p.lng)}
   const altMin=Math.min(...P.map(p=>p.alt));
+  // smoothed values for route coloring (speed ±5 pts, power ±15 pts, within a segment)
+  for(let i=0;i<P.length;i++){let sv=0,nv=0,sp=0,np=0;
+    for(let k=-15;k<=15;k++){const q=P[i+k];if(!q||q.seg!==P[i].seg)continue;sp+=q.pw;np++;if(k>=-5&&k<=5){sv+=q.v;nv++}}
+    P[i].cv=sv/nv;P[i].cp=sp/np}
+  const pct=(arr,q)=>{const s=[...arr].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor(q*s.length))]};
+  const rng={speed:[pct(P.map(p=>p.cv),.05),pct(P.map(p=>p.cv),.95)],power:[pct(P.map(p=>p.cp),.05),pct(P.map(p=>p.cp),.95)]};
   return {P,segs:segInfo,A:P[P.length-1].a,dist:P[P.length-1].d,up,maxAlt,altMin,maxV,avgHr:hrN?hrS/hrN:0,moving,
-    bounds:[[minLng,minLat],[maxLng,maxLat]],hasHr:hrN>0,hasPw:P.some(p=>p.pw>0),hasCad:P.some(p=>p.cad>0)};
+    bounds:[[minLng,minLat],[maxLng,maxLat]],hasHr:hrN>0,hasPw:P.some(p=>p.pw>0),hasCad:P.some(p=>p.cad>0),rng};
 }
 function sampleAt(a){
   const P=RIDE.P;let lo=0,hi=P.length-1;
@@ -207,7 +219,7 @@ function sampleAt(a){
 
 /* ---------------- timeline ---------------- */
 const INTRO=4.5,OUTRO=6,PAUSE=2.6;
-const state={dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
+const state={cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
 function pauses(){return state.mode==='split'?RIDE.segs.slice(0,-1).map(s=>s.a1):[]}
 function total(){return INTRO+state.dur+pauses().length*PAUSE+OUTRO}
 // map timeline T -> {phase, a, pauseIdx}
@@ -253,23 +265,44 @@ function routeFC(){
   }
   return{type:'FeatureCollection',features:fs};
 }
+function normVal(p){
+  if(state.cmode==='solid')return 0;
+  const r=RIDE.rng[state.cmode],v=state.cmode==='speed'?p.cv:p.cp;
+  return Math.max(0,Math.min(1,(v-r[0])/((r[1]-r[0])||1)));
+}
 function doneFC(cur){
-  const fs=[];
+  const fs=[],P=RIDE.P,grad=state.cmode!=='solid',CH=6;
   RIDE.segs.forEach((s,i)=>{
     if(cur.k<s.i0)return;
-    const end=Math.min(cur.k,s.i1);const c=RIDE.P.slice(s.i0,end+1).map(p=>[p.lng,p.lat]);
-    if(cur.k>=s.i0&&cur.k<=s.i1)c.push([cur.lng,cur.lat]);
-    if(c.length>1)fs.push(lineFeature(c,state.mode==='split'?i:0));
+    const end=Math.min(cur.k,s.i1),live=cur.k>=s.i0&&cur.k<=s.i1,sg=state.mode==='split'?i:0;
+    if(!grad){
+      const c=P.slice(s.i0,end+1).map(p=>[p.lng,p.lat]);if(live)c.push([cur.lng,cur.lat]);
+      if(c.length>1)fs.push(lineFeature(c,sg));return;
+    }
+    for(let j=s.i0;j<=end;j+=CH){
+      const j2=Math.min(j+CH,end);const c=[];let n=0,m=0;
+      for(let k=j;k<=j2;k++){c.push([P[k].lng,P[k].lat]);n+=normVal(P[k]);m++}
+      if(j2===end&&live)c.push([cur.lng,cur.lat]);
+      if(c.length>1){const f=lineFeature(c,sg);f.properties.n=n/m;fs.push(f)}
+    }
   });
   return{type:'FeatureCollection',features:fs};
 }
-const segColor=['match',['get','seg'],1,'#57d3e6',2,'#c59bff','#ffb547'];
+const RAMP=[[0,'#3b6fd8'],[.25,'#2fbf9a'],[.5,'#e8e04a'],[.75,'#ff9a3c'],[1,'#ff3d55']];
+function rampColor(n){for(let i=1;i<RAMP.length;i++){if(n<=RAMP[i][0]){const [a,ca]=RAMP[i-1],[b,cb]=RAMP[i];const u=(n-a)/(b-a);
+  const h=c=>[1,3,5].map(o=>parseInt(c.slice(o,o+2),16));const x=h(ca),y=h(cb);return`rgb(${x.map((v,k)=>Math.round(v+(y[k]-v)*u)).join(',')})`}}return RAMP[RAMP.length-1][1]}
+function lineColor(){
+  if(state.cmode!=='solid')return['interpolate',['linear'],['get','n'],...RAMP.flat()];
+  return['match',['get','seg'],1,'#57d3e6',2,'#c59bff',state.color];
+}
+function riderColor(){if(state.cmode!=='solid')return rampColor(normVal(cur));return state.mode==='split'&&cur.seg===1?'#57d3e6':state.color}
+function applyLineColor(){if(!map.getLayer('done'))return;const e=lineColor();map.setPaintProperty('done','line-color',e);map.setPaintProperty('done-glow','line-color',e);seek(state.T)}
 function addRouteLayers(){
   map.addSource('route',{type:'geojson',data:routeFC()});
   map.addSource('done',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
   map.addLayer({id:'route-base',type:'line',source:'route',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':'#ffffff','line-opacity':.38,'line-width':3}});
-  map.addLayer({id:'done-glow',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':segColor,'line-width':14,'line-blur':10,'line-opacity':.55}});
-  map.addLayer({id:'done',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':segColor,'line-width':4.5}});
+  map.addLayer({id:'done-glow',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':lineColor(),'line-width':14,'line-blur':10,'line-opacity':.55}});
+  map.addLayer({id:'done',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':lineColor(),'line-width':4.5}});
 }
 function refreshRoute(){if(map.getSource('route'))map.getSource('route').setData(routeFC())}
 
@@ -348,7 +381,7 @@ function drawHud(){
   if(ph.phase==='outro'){const p=P[P.length-1];pin(p.lng,p.lat,'終點','#ffb547',s)}
   // rider
   if(ph.phase!=='intro'){
-    const q=map.project([cur.lng,cur.lat]);const col=state.mode==='split'&&cur.seg===1?'#57d3e6':'#ffb547';
+    const q=map.project([cur.lng,cur.lat]);const col=riderColor();
     const pulse=(performance.now()/900)%1;
     hg.beginPath();hg.arc(q.x,q.y,(9+pulse*16)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.35*(1-pulse)})`;hg.fill();
     hg.beginPath();hg.arc(q.x,q.y,8*s,0,7);hg.fillStyle='#fff';hg.fill();
@@ -361,6 +394,14 @@ function drawHud(){
   const t0=RIDE.segs[0].t0;
   let sub=`${dateStr(t0)}  ${clock(t0)} 出發`;if(RIDE.segs.length>1)sub+=`  ·  ${RIDE.segs.length} 段紀錄`;
   hg.fillText(sub,pad,pad+46*s);
+  if(state.cmode!=='solid'){
+    const r=RIDE.rng[state.cmode],isS=state.cmode==='speed',lx=pad,ly=pad+60*s,lw=130*s,lh=6*s;
+    const lg=hg.createLinearGradient(lx,0,lx+lw,0);RAMP.forEach(([o,c])=>lg.addColorStop(o,c));
+    hg.font=`500 ${11*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.78)';hg.textAlign='left';hg.fillText(isS?'速度':'功率',lx,ly+lh);
+    const bx=lx+30*s;hg.fillStyle=lg;rr(bx,ly,lw,lh,lh/2);hg.fill();
+    hg.font=`500 ${12*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.85)';
+    hg.fillText(`${Math.round(r[0])} – ${Math.round(r[1])} ${isS?'km/h':'W'}`,bx+lw+8*s,ly+lh+1*s);
+  }
   // clock top-right
   hg.textAlign='right';hg.font=`600 ${30*s}px ${FN}`;hg.fillStyle='#fff';
   hg.fillText(clock(ph.phase==='intro'?t0:cur.t),W-pad,pad+26*s);
@@ -388,7 +429,7 @@ function drawHud(){
   hg.textAlign='right';hg.font=`400 ${9*s}px ${fb}`;hg.fillStyle='rgba(255,255,255,.45)';
   hg.fillText('Imagery © Esri, Maxar, Earthstar Geographics · Terrain © Mapzen / AWS',W-pad,H-6*s);
   if(ph.phase==='outro')drawSummary(s,fb,ph.u);
-  if(state.rec){hg.textAlign='left';hg.fillStyle='#ff5d5d';hg.beginPath();hg.arc(pad+5*s,pad+66*s,5*s,0,7);hg.fill()}
+  if(state.rec){hg.textAlign='left';hg.fillStyle='#ff5d5d';hg.beginPath();hg.arc(W-pad-5*s,pad+64*s,5*s,0,7);hg.fill()}
 }
 function drawProfile(x,y,w,h,s,fb){
   const P=RIDE.P,D=RIDE.dist,lo=RIDE.altMin,hi=RIDE.maxAlt,span=Math.max(50,hi-lo);
@@ -400,8 +441,13 @@ function drawProfile(x,y,w,h,s,fb){
   if(ph.phase!=='intro'){
     hg.save();hg.beginPath();hg.rect(x,y-4,X(cur.d)-x,h+8);hg.clip();
     path(1e9);hg.lineTo(x+w,y+h);hg.closePath();
-    const g=hg.createLinearGradient(0,y,0,y+h);g.addColorStop(0,'rgba(255,181,71,.75)');g.addColorStop(1,'rgba(255,181,71,.15)');hg.fillStyle=g;hg.fill();
-    path(1e9);hg.strokeStyle='#ffb547';hg.lineWidth=2*s;hg.stroke();hg.restore();
+    const hx=state.color,rgb=[1,3,5].map(o=>parseInt(hx.slice(o,o+2),16)).join(',');
+    const g=hg.createLinearGradient(0,y,0,y+h);
+    if(state.cmode==='solid'){g.addColorStop(0,`rgba(${rgb},.75)`);g.addColorStop(1,`rgba(${rgb},.15)`)}else{g.addColorStop(0,'rgba(255,255,255,.32)');g.addColorStop(1,'rgba(255,255,255,.06)')}
+    hg.fillStyle=g;hg.fill();
+    if(state.cmode==='solid'){path(1e9);hg.strokeStyle=hx;hg.lineWidth=2*s;hg.stroke()}
+    else{hg.lineWidth=2.4*s;for(let i=step;i<P.length;i+=step){const q=P[i-step],r=P[i];if(q.seg!==r.seg)continue;hg.beginPath();hg.moveTo(X(q.d),Y(q.alt));hg.lineTo(X(r.d),Y(r.alt));hg.strokeStyle=rampColor(normVal(r));hg.stroke()}}
+    hg.restore();
   }
   // segment boundaries
   RIDE.segs.slice(0,-1).forEach(sg=>{const xx=X(P[sg.i1].d);hg.setLineDash([3*s,3*s]);hg.strokeStyle='rgba(87,211,230,.8)';hg.lineWidth=1*s;hg.beginPath();hg.moveTo(xx,y);hg.lineTo(xx,y+h);hg.stroke();hg.setLineDash([])});
@@ -409,7 +455,7 @@ function drawProfile(x,y,w,h,s,fb){
   hg.font=`500 ${10*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.6)';hg.textAlign='left';
   hg.fillText(Math.round(hi)+' m',x+2,y+9*s);
   hg.textAlign='right';hg.fillText(D.toFixed(1)+' km',x+w,y+h-3*s);
-  if(ph.phase!=='intro'){const cx=X(cur.d),cy=Y(cur.alt);hg.beginPath();hg.arc(cx,cy,4.5*s,0,7);hg.fillStyle='#fff';hg.fill();hg.strokeStyle='#ffb547';hg.lineWidth=2*s;hg.stroke()}
+  if(ph.phase!=='intro'){const cx=X(cur.d),cy=Y(cur.alt);hg.beginPath();hg.arc(cx,cy,4.5*s,0,7);hg.fillStyle='#fff';hg.fill();hg.strokeStyle=riderColor();hg.lineWidth=2*s;hg.stroke()}
 }
 function drawSummary(s,fb,u){
   const a=Math.min(1,Math.max(0,(u-.35)/.3));if(a<=0)return;
@@ -487,6 +533,11 @@ document.getElementById('dur').onchange=e=>{const u=state.T/total();state.dur=+e
 function setMode(m){state.mode=m;document.getElementById('m-seam').setAttribute('aria-pressed',m==='seam');document.getElementById('m-split').setAttribute('aria-pressed',m==='split');refreshRoute();seek(Math.min(state.T,total()))}
 document.getElementById('m-seam').onclick=()=>setMode('seam');
 document.getElementById('m-split').onclick=()=>setMode('split');
+const cmodeEl=document.getElementById('cmode'),ccolorEl=document.getElementById('ccolor');
+cmodeEl.onchange=()=>{state.cmode=cmodeEl.value;ccolorEl.hidden=state.cmode!=='solid';applyLineColor()};
+ccolorEl.oninput=()=>{state.color=ccolorEl.value;applyLineColor()};
+function syncColorUI(){const o=cmodeEl.querySelector('option[value=power]');o.disabled=!RIDE.hasPw;
+  if(!RIDE.hasPw&&state.cmode==='power'){cmodeEl.value=state.cmode='solid';ccolorEl.hidden=false}applyLineColor()}
 const titleEl=document.getElementById('title');state.title=titleEl.value;titleEl.oninput=()=>{state.title=titleEl.value;map.triggerRepaint()};
 document.getElementById('rec').onclick=()=>{if(state.rec)stopRec();else startRec()};
 function layout(){
@@ -512,7 +563,7 @@ async function loadFiles(files){
     toast(`已載入 ${segs.length} 段紀錄`);
   }catch(err){toast('讀取失敗：'+(err.message||'檔案格式不支援'))}
 }
-function setRide(r){RIDE=r;setPlaying(false);refreshRoute();computeOverview();state.T=0;update(0,true);syncUI();
+function setRide(r){RIDE=r;setPlaying(false);refreshRoute();syncColorUI();computeOverview();state.T=0;update(0,true);syncUI();
   document.getElementById('m-split').parentElement.style.opacity=RIDE.segs.length>1?1:.4}
 
 /* ---------------- boot ---------------- */
@@ -520,7 +571,7 @@ function setRide(r){RIDE=r;setPlaying(false);refreshRoute();computeOverview();st
   sizeHud();requestAnimationFrame(frame);
   const segs=(await (await fetch('rides.json')).json()).map(cleanSegment);
   await new Promise(r=>map.loaded()?r():map.on('load',r));
-  RIDE=buildRide(segs);addRouteLayers();computeOverview();layout();update(0,true);syncUI();
+  RIDE=buildRide(segs);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
   document.getElementById('loadmsg').textContent='準備完成';
   const done=()=>{if(done.x)return;done.x=1;document.getElementById('loading').classList.add('gone');setTimeout(()=>{if(!state.T)setPlaying(true)},500)};
   map.once('idle',done);setTimeout(done,12000);
