@@ -202,7 +202,7 @@ function buildRide(segs){
   // smoothed values for route coloring (speed ±5 pts, power ±15 pts, within a segment)
   for(let i=0;i<P.length;i++){let sv=0,nv=0,sp=0,np=0;
     for(let k=-15;k<=15;k++){const q=P[i+k];if(!q||q.seg!==P[i].seg)continue;sp+=q.pw;np++;if(k>=-5&&k<=5){sv+=q.v;nv++}}
-    P[i].cv=sv/nv;P[i].cp=sp/np}
+    P[i].cv=sv/nv;P[i].cp=sp/np;let s3=0,n3=0;for(let k=-1;k<=1;k++){const q=P[i+k];if(q&&q.seg===P[i].seg){s3+=q.pw;n3++}}P[i].p3=s3/n3}
   const pct=(arr,q)=>{const s=[...arr].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor(q*s.length))]};
   const rng={speed:[pct(P.map(p=>p.cv),.05),pct(P.map(p=>p.cv),.95)],power:[pct(P.map(p=>p.cp),.05),pct(P.map(p=>p.cp),.95)]};
   return {P,segs:segInfo,A:P[P.length-1].a,dist:P[P.length-1].d,up,maxAlt,altMin,maxV,avgHr:hrN?hrS/hrN:0,moving,
@@ -415,13 +415,14 @@ function drawHud(){
   // stats row
   const stats=[['時速',cur.v.toFixed(1),'km/h'],['距離',cur.d.toFixed(2),'km'],['海拔',Math.round(cur.alt),'m']];
   if(RIDE.hasHr)stats.push(['心率',cur.hr||'—','bpm']);
-  if(RIDE.hasPw&&W>480)stats.push(['功率',cur.pw||'0','W']);
-  if(RIDE.hasCad&&W>560)stats.push(['踏頻',cur.cad||'0','rpm']);
-  const cols=stats.length,cw=pw/cols,sy=py-14*s;
+  if(RIDE.hasPw)stats.push(['功率',Math.round(cur.p3)||'0','W']);
+  if(RIDE.hasCad)stats.push(['踏頻',cur.cad||'0','rpm']);
+  const narrow=W<640&&stats.length>4,cols=narrow?Math.ceil(stats.length/2):stats.length,cw=pw/cols,sy0=py-14*s,rowH=60*s;
   stats.forEach((st,i)=>{
-    const x=pad+i*cw;hg.textAlign='left';
+    const row=narrow?Math.floor(i/cols):0,rows=narrow?Math.ceil(stats.length/cols):1,sy=sy0-(rows-1-row)*rowH;
+    const x=pad+(i%cols)*cw;hg.textAlign='left';
     hg.font=`500 ${11.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.66)';hg.fillText(st[0],x,sy-44*s);
-    const nf=W<480?.82:1;hg.font=`600 ${(i===0?42:36)*s*nf}px ${FN}`;hg.fillStyle=i===0?'#ffb547':'#fff';
+    const nf=W<480?.86:1;hg.font=`600 ${(i===0?42:36)*s*nf}px ${FN}`;hg.fillStyle=i===0?'#ffb547':'#fff';
     const vs=String(st[1]);hg.fillText(vs,x,sy-6*s);const vw=hg.measureText(vs).width;
     hg.font=`500 ${13*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.7)';hg.fillText(st[2],x+vw+4*s,sy-6*s);
   });
