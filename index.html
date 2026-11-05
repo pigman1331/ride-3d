@@ -102,7 +102,11 @@ label.sm{font-size:12px;color:var(--muted)}
     <div class="grp">
       <label class="sm hide-sm" for="title">標題</label>
       <input type="text" id="title" value="晨騎・內湖山區" maxlength="24">
-      <select id="quality" aria-label="影片畫質"><option value="1280" selected>720p 快速</option><option value="1920">1080p 高畫質</option></select>
+    </div>
+    <div class="grp">
+      <label class="sm" for="recmode">影片</label>
+      <select id="recmode" aria-label="錄製方式"><option value="rt" selected>即時錄製</option><option value="frame">逐格輸出（手機）</option></select>
+      <select id="quality" aria-label="影片畫質"><option value="1280">720p</option><option value="1920" selected>1080p</option></select>
       <button id="rec"><span class="dot"></span><span id="rectext">錄成影片</span></button>
       <button id="open">換檔案</button>
       <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
@@ -483,13 +487,13 @@ let lastFrame=performance.now();
 function frame(now){
   const dt=Math.min(.25,(now-lastFrame)/1000);lastFrame=now;
   if(RIDE&&overview){
-    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false)}
+    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false);if(state.rec&&state.rec.rt){update(0,false);map.redraw();finishRec();}}
       update(dt,false);syncUI();}
     else if(cur&&!state.rec)pulseTick(now);
   }
   requestAnimationFrame(frame);
 }
-map.on('render',()=>drawHud());
+map.on('render',()=>{drawHud();captureLive()});
 let lastPulse=0;function pulseTick(now){if(now-lastPulse>60){lastPulse=now;drawHud()}}
 function seek(T){state.T=Math.max(0,Math.min(total(),T));if(RIDE&&overview){update(0,true);syncUI()}}
 
@@ -516,44 +520,61 @@ async function startRec(){
   const box=map.getContainer(),cw=box.clientWidth,ch=box.clientHeight;
   const cfg=await pickConfig(cw,ch,+document.getElementById('quality').value);
   if(!cfg){toast('這台裝置不支援 H.264 編碼，無法輸出 MP4。');return}
-  // render the map and HUD at exactly the output size (much less GPU work on high-DPI phones)
-  const pr0=map.getPixelRatio(),pr=cfg.width/cw;map.setPixelRatio(pr);hudDprOverride=pr;sizeHud();
   recCanvas=document.createElement('canvas');recCanvas.width=cfg.width;recCanvas.height=cfg.height;recCtx=recCanvas.getContext('2d');
-  setPlaying(false);state.rec={cancel:false};setRecUI(true,'取消輸出');
+  const rt=document.getElementById('recmode').value==='rt';
+  setPlaying(false);
+  const pr0=map.getPixelRatio();map.setPixelRatio(cfg.width/cw);hudDprOverride=cfg.width/cw;sizeHud();
   const target=new Mp4Muxer.ArrayBufferTarget();
   const muxer=new Mp4Muxer.Muxer({target,video:{codec:'avc',width:cfg.width,height:cfg.height,frameRate:30},fastStart:'in-memory',firstTimestampBehavior:'offset'});
-  let encErr=null;
-  const enc=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>{encErr=e}});
-  enc.configure(cfg);
-  const fps=30,N=Math.ceil(total()*fps)+1;
+  const rec={cancel:false,rt,err:null,lastTs:-1,lastKey:-1e9,pr0,muxer,target};
+  rec.enc=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>{rec.err=e}});
+  rec.enc.configure(cfg);
+  state.rec=rec;setRecUI(true,'準備中…');
+  seek(0);await waitIdle(8000);
+  if(rt){setRecUI(true,'錄影中（停止）');toast('錄影中，播完會自動存檔');lastFrame=performance.now();setPlaying(true);return}
+  // frame-by-frame export (slower, for phones)
+  const fps=30,N=Math.ceil(total()*fps)+1,t0=performance.now();
   try{
-    seek(0);await waitIdle(8000);
-    const t0=performance.now();
     for(let i=0;i<N;i++){
-      if(state.rec.cancel||encErr)break;
+      if(rec.cancel||rec.err)break;
       state.T=Math.min(total(),i/fps);hudClock=i*1000/fps;update(1/fps,i===0);
-      map.redraw();                                   // synchronous render, no waiting for the next screen refresh
+      map.redraw();
       if(!map.areTilesLoaded()){await waitIdle(2500);map.redraw()}
-      else if(i%4===0)await new Promise(r=>setTimeout(r,0)); // let tile loading progress
-      compose();
-      const vf=new VideoFrame(recCanvas,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});
-      enc.encode(vf,{keyFrame:i%60===0});vf.close();
-      while(enc.encodeQueueSize>8)await new Promise(r=>setTimeout(r,5));
+      else if(i%4===0)await new Promise(r=>setTimeout(r,0));
+      encodeFrame(Math.round(i*1e6/fps),i%60===0);
+      while(rec.enc.encodeQueueSize>8)await new Promise(r=>setTimeout(r,5));
       if(i%15===0){const el=(performance.now()-t0)/1000,left=i>30?Math.round(el/i*(N-i)):null;
         document.getElementById('rectext').textContent=`輸出中 ${Math.round(i/N*100)}%`+(left!=null?` · 約剩 ${fmtT(left)}`:'')+'（取消）';syncUI()}
     }
-    await enc.flush();
-  }catch(e){encErr=e}
-  const cancelled=state.rec.cancel;hudClock=null;state.rec=null;setRecUI(false,'錄成影片');try{enc.close()}catch(e){}
-  map.setPixelRatio(pr0);hudDprOverride=null;sizeHud();seek(state.T);
-  if(encErr){toast('輸出失敗：'+(encErr.message||'編碼錯誤'));return}
-  if(cancelled){toast('已取消輸出');return}
-  muxer.finalize();
-  const blob=new Blob([target.buffer],{type:'video/mp4'});
+  }catch(e){rec.err=e}
+  finishRec();
+}
+function encodeFrame(ts,key){
+  const rec=state.rec;compose();
+  const vf=new VideoFrame(recCanvas,{timestamp:ts,duration:Math.round(1e6/30)});
+  rec.enc.encode(vf,{keyFrame:key});vf.close();rec.lastTs=ts;if(key)rec.lastKey=ts;
+}
+// real-time capture: called after every map render while recording
+function captureLive(){
+  const rec=state.rec;if(!rec||!rec.rt||!state.playing||rec.err)return;
+  const ts=Math.round(state.T*1e6);if(ts<=rec.lastTs)return;
+  if(rec.enc.encodeQueueSize>30)return;               // encoder busy: drop this frame rather than stall playback
+  encodeFrame(ts,ts-rec.lastKey>=2e6);
+}
+async function finishRec(){
+  const rec=state.rec;if(!rec||rec.done)return;rec.done=true;setPlaying(false);
+  try{await rec.enc.flush()}catch(e){rec.err=rec.err||e}
+  try{rec.enc.close()}catch(e){}
+  hudClock=null;state.rec=null;setRecUI(false,'錄成影片');
+  map.setPixelRatio(rec.pr0);hudDprOverride=null;sizeHud();seek(state.T);
+  if(rec.err){toast('輸出失敗：'+(rec.err.message||'編碼錯誤'));return}
+  if(rec.cancel){toast('已取消錄影');return}
+  rec.muxer.finalize();
+  const blob=new Blob([rec.target.buffer],{type:'video/mp4'});
   const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.mp4`;
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
-function stopRec(){if(state.rec)state.rec.cancel=true}
+function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.rt)finishRec()}
 function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open,#play').forEach(el=>el.disabled=!on)}
 
 /* ---------------- UI ---------------- */
