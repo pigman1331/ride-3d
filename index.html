@@ -102,6 +102,7 @@ label.sm{font-size:12px;color:var(--muted)}
     <div class="grp">
       <label class="sm hide-sm" for="title">標題</label>
       <input type="text" id="title" value="晨騎・內湖山區" maxlength="24">
+      <select id="quality" aria-label="影片畫質"><option value="1280" selected>720p 快速</option><option value="1920">1080p 高畫質</option></select>
       <button id="rec"><span class="dot"></span><span id="rectext">錄成影片</span></button>
       <button id="open">換檔案</button>
       <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
@@ -352,7 +353,8 @@ function update(dt,snap){
 /* ---------------- HUD (drawn on canvas so recordings include it) ---------------- */
 const hud=document.getElementById('hud'),hg=hud.getContext('2d');
 let W=0,H=0,DPR=1;
-function sizeHud(){const r=hud.getBoundingClientRect();DPR=Math.min(2,window.devicePixelRatio||1);W=r.width;H=r.height;hud.width=Math.round(W*DPR);hud.height=Math.round(H*DPR)}
+let hudDprOverride=null;
+function sizeHud(){const r=hud.getBoundingClientRect();DPR=hudDprOverride||Math.min(2,window.devicePixelRatio||1);W=r.width;H=r.height;hud.width=Math.round(W*DPR);hud.height=Math.round(H*DPR)}
 const fmtT=s=>{s=Math.max(0,Math.round(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${m}:${String(x).padStart(2,'0')}`};
 const clock=t=>new Date(t*1000).toLocaleTimeString('zh-TW',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hour12:false});
 const dateStr=t=>{const d=new Date(t*1000);return d.toLocaleDateString('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short'})};
@@ -496,9 +498,9 @@ let recCanvas,recCtx,downloads=null,hudClock=null;
 
 function compose(){recCtx.drawImage(map.getCanvas(),0,0,recCanvas.width,recCanvas.height);recCtx.drawImage(hud,0,0,recCanvas.width,recCanvas.height)}
 const even=n=>Math.max(2,Math.round(n/2)*2);
-async function pickConfig(w,h){
-  for(const maxSide of [1920,1280,960]){
-    const k=Math.min(1,maxSide/Math.max(w,h)),W2=even(w*k),H2=even(h*k);
+async function pickConfig(w,h,top){
+  for(const maxSide of [top,1280,960].filter(x=>x<=top)){
+    const k=maxSide/Math.max(w,h),W2=even(w*k),H2=even(h*k);
     for(const codec of ['avc1.640028','avc1.4d0028','avc1.42002a','avc1.42001f']){
       const cfg={codec,width:W2,height:H2,bitrate:Math.round(W2*H2*30*.18),framerate:30,avc:{format:'avc'}};
       try{const r=await VideoEncoder.isConfigSupported(cfg);if(r.supported)return cfg}catch(e){}
@@ -511,8 +513,11 @@ function waitIdle(ms){return new Promise(r=>{let done=false;const f=()=>{if(!don
 function setRecUI(on,text){const b=document.getElementById('rec');b.classList.toggle('on',on);document.getElementById('rectext').textContent=text;setDock(!on)}
 async function startRec(){
   if(!window.VideoEncoder||!window.VideoFrame||!window.Mp4Muxer){toast('這個瀏覽器不支援輸出影片，請改用最新版 Chrome、Edge 或 Safari。');return}
-  const mc=map.getCanvas();const cfg=await pickConfig(mc.width,mc.height);
+  const box=map.getContainer(),cw=box.clientWidth,ch=box.clientHeight;
+  const cfg=await pickConfig(cw,ch,+document.getElementById('quality').value);
   if(!cfg){toast('這台裝置不支援 H.264 編碼，無法輸出 MP4。');return}
+  // render the map and HUD at exactly the output size (much less GPU work on high-DPI phones)
+  const pr0=map.getPixelRatio(),pr=cfg.width/cw;map.setPixelRatio(pr);hudDprOverride=pr;sizeHud();
   recCanvas=document.createElement('canvas');recCanvas.width=cfg.width;recCanvas.height=cfg.height;recCtx=recCanvas.getContext('2d');
   setPlaying(false);state.rec={cancel:false};setRecUI(true,'取消輸出');
   const target=new Mp4Muxer.ArrayBufferTarget();
@@ -523,20 +528,24 @@ async function startRec(){
   const fps=30,N=Math.ceil(total()*fps)+1;
   try{
     seek(0);await waitIdle(8000);
+    const t0=performance.now();
     for(let i=0;i<N;i++){
       if(state.rec.cancel||encErr)break;
       state.T=Math.min(total(),i/fps);hudClock=i*1000/fps;update(1/fps,i===0);
-      await waitRender();
-      if(!map.areTilesLoaded()){await waitIdle(2500);await waitRender()}
+      map.redraw();                                   // synchronous render, no waiting for the next screen refresh
+      if(!map.areTilesLoaded()){await waitIdle(2500);map.redraw()}
+      else if(i%4===0)await new Promise(r=>setTimeout(r,0)); // let tile loading progress
       compose();
       const vf=new VideoFrame(recCanvas,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});
       enc.encode(vf,{keyFrame:i%60===0});vf.close();
       while(enc.encodeQueueSize>8)await new Promise(r=>setTimeout(r,5));
-      if(i%15===0){document.getElementById('rectext').textContent=`輸出中 ${Math.round(i/N*100)}%（取消）`;syncUI()}
+      if(i%15===0){const el=(performance.now()-t0)/1000,left=i>30?Math.round(el/i*(N-i)):null;
+        document.getElementById('rectext').textContent=`輸出中 ${Math.round(i/N*100)}%`+(left!=null?` · 約剩 ${fmtT(left)}`:'')+'（取消）';syncUI()}
     }
     await enc.flush();
   }catch(e){encErr=e}
   const cancelled=state.rec.cancel;hudClock=null;state.rec=null;setRecUI(false,'錄成影片');try{enc.close()}catch(e){}
+  map.setPixelRatio(pr0);hudDprOverride=null;sizeHud();seek(state.T);
   if(encErr){toast('輸出失敗：'+(encErr.message||'編碼錯誤'));return}
   if(cancelled){toast('已取消輸出');return}
   muxer.finalize();
@@ -545,7 +554,7 @@ async function startRec(){
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
 function stopRec(){if(state.rec)state.rec.cancel=true}
-function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open').forEach(el=>el.disabled=!on)}
+function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open,#play').forEach(el=>el.disabled=!on)}
 
 /* ---------------- UI ---------------- */
 let toastT;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,3800)}
