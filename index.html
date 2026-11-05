@@ -116,6 +116,7 @@ label.sm{font-size:12px;color:var(--muted)}
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script>
 // Minimal FIT reader: returns record messages as [unix, lat, lon, alt, distM, kmh, hr, cad, pwr, temp]
 function parseFIT(buf){
@@ -487,7 +488,7 @@ let lastFrame=performance.now();
 function frame(now){
   const dt=Math.min(.25,(now-lastFrame)/1000);lastFrame=now;
   if(RIDE&&overview){
-    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false);if(state.rec&&state.rec.rt){update(0,false);map.redraw();finishRec();}}
+    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false);if(state.rec&&state.rec.live){update(0,false);map.redraw();const mr=state.rec.mr;setTimeout(()=>{if(mr.state!=='inactive')mr.stop()},300)}}
       update(dt,false);syncUI();}
     else if(cur&&!state.rec)pulseTick(now);
   }
@@ -515,13 +516,72 @@ async function pickConfig(w,h,top){
 function waitRender(){return new Promise(r=>{map.once('render',r);map.triggerRepaint()})}
 function waitIdle(ms){return new Promise(r=>{let done=false;const f=()=>{if(!done){done=true;r()}};map.once('idle',f);setTimeout(f,ms)})}
 function setRecUI(on,text){const b=document.getElementById('rec');b.classList.toggle('on',on);document.getElementById('rectext').textContent=text;setDock(!on)}
+// shared remux: fragmented MP4 (MediaRecorder) -> regular faststart MP4
+function remuxMp4(buf){
+  return new Promise((resolve,reject)=>{
+    const f=MP4Box.createFile();let info=null;const samples=[];
+    f.onError=e=>reject(new Error(e));
+    f.onReady=i=>{info=i;const tr=i.videoTracks[0];if(!tr)return reject(new Error('沒有影像軌'));
+      f.setExtractionOptions(tr.id,null,{nbSamples:1e9});f.start()};
+    f.onSamples=(id,u,s)=>{for(const x of s)samples.push(x)};
+    buf.fileStart=0;f.appendBuffer(buf);f.flush();
+    setTimeout(()=>{try{
+      if(!info||!samples.length)throw new Error('讀不到影格');
+      const tr=info.videoTracks[0],trak=f.getTrackById(tr.id);
+      const entry=trak.mdia.minf.stbl.stsd.entries[0];const box=entry.avcC||entry.hvcC;
+      const DS=(window.MP4Box&&MP4Box.DataStream)||window.DataStream;const ds=new DS(undefined,0,DS.BIG_ENDIAN);box.write(ds);
+      const description=new Uint8Array(ds.buffer,8);
+      const w=tr.video?tr.video.width:tr.track_width,h=tr.video?tr.video.height:tr.track_height;
+      const target=new Mp4Muxer.ArrayBufferTarget();
+      const mux=new Mp4Muxer.Muxer({target,video:{codec:'avc',width:w,height:h},fastStart:'in-memory',firstTimestampBehavior:'offset'});
+      samples.sort((a,b)=>a.dts-b.dts);
+      samples.forEach((s,k)=>{
+        const ts=Math.round(s.cts/s.timescale*1e6),du=Math.max(1,Math.round(s.duration/s.timescale*1e6));
+        mux.addVideoChunkRaw(s.data,s.is_sync?'key':'delta',ts,du,k===0?{decoderConfig:{codec:tr.codec,codedWidth:w,codedHeight:h,description}}:undefined);
+      });
+      mux.finalize();resolve(target.buffer);
+    }catch(e){reject(e)}},0);
+  });
+}
+
+
+function pickMime(){for(const m of['video/mp4;codecs=avc1.640028','video/mp4;codecs=avc1.4d0028','video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm'])if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m))return m;return null}
+// real-time: play once and record the composed canvas with the browser's own (hardware) encoder,
+// then rewrite the MP4 index so phones / IG can read its duration
+async function startLiveRec(){
+  const mime=pickMime();
+  if(!mime||!HTMLCanvasElement.prototype.captureStream){toast('這個瀏覽器不支援即時錄製，請改選「逐格輸出」。');return}
+  const mc=map.getCanvas(),cap=+document.getElementById('quality').value,k=Math.min(1,cap/Math.max(mc.width,mc.height));
+  recCanvas=document.createElement('canvas');recCanvas.width=even(mc.width*k);recCanvas.height=even(mc.height*k);recCtx=recCanvas.getContext('2d');
+  setPlaying(false);const rec={rt:true,live:true,cancel:false,chunks:[],mime};state.rec=rec;setRecUI(true,'準備中…');
+  seek(0);await waitIdle(6000);compose();
+  const stream=recCanvas.captureStream(30);
+  rec.mr=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:Math.round(recCanvas.width*recCanvas.height*30*.2)});
+  rec.mr.ondataavailable=e=>{if(e.data.size)rec.chunks.push(e.data)};
+  rec.mr.onstop=()=>saveLive(rec);rec.mr.start(1000);
+  setRecUI(true,'錄影中（停止）');toast('錄影中，播完會自動存檔');lastFrame=performance.now();setPlaying(true);
+}
+async function saveLive(rec){
+  state.rec=null;setRecUI(false,'錄成影片');
+  if(rec.cancel){toast('已取消錄影');return}
+  const isMp4=rec.mime.includes('mp4');let blob=new Blob(rec.chunks,{type:isMp4?'video/mp4':'video/webm'});
+  if(isMp4&&window.MP4Box&&window.Mp4Muxer){
+    setRecUI(true,'整理檔案中…');
+    try{blob=new Blob([await remuxMp4(await blob.arrayBuffer())],{type:'video/mp4'})}catch(e){console.warn('remux failed',e)}
+    setRecUI(false,'錄成影片');
+  }
+  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.${isMp4?'mp4':'webm'}`;
+  if(!isMp4)toast('這個瀏覽器只能錄成 webm，IG 可能無法上傳；建議改用 Chrome 或 Edge。');
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
+}
 async function startRec(){
+  if(document.getElementById('recmode').value==='rt')return startLiveRec();
   if(!window.VideoEncoder||!window.VideoFrame||!window.Mp4Muxer){toast('這個瀏覽器不支援輸出影片，請改用最新版 Chrome、Edge 或 Safari。');return}
   const box=map.getContainer(),cw=box.clientWidth,ch=box.clientHeight;
   const cfg=await pickConfig(cw,ch,+document.getElementById('quality').value);
   if(!cfg){toast('這台裝置不支援 H.264 編碼，無法輸出 MP4。');return}
   recCanvas=document.createElement('canvas');recCanvas.width=cfg.width;recCanvas.height=cfg.height;recCtx=recCanvas.getContext('2d');
-  const rt=document.getElementById('recmode').value==='rt';
+  const rt=false;
   setPlaying(false);
   const pr0=map.getPixelRatio();map.setPixelRatio(cfg.width/cw);hudDprOverride=cfg.width/cw;sizeHud();
   const target=new Mp4Muxer.ArrayBufferTarget();
@@ -531,7 +591,6 @@ async function startRec(){
   rec.enc.configure(cfg);
   state.rec=rec;setRecUI(true,'準備中…');
   seek(0);await waitIdle(8000);
-  if(rt){setRecUI(true,'錄影中（停止）');toast('錄影中，播完會自動存檔');lastFrame=performance.now();setPlaying(true);return}
   // frame-by-frame export (slower, for phones)
   const fps=30,N=Math.ceil(total()*fps)+1,t0=performance.now();
   try{
@@ -555,12 +614,7 @@ function encodeFrame(ts,key){
   rec.enc.encode(vf,{keyFrame:key});vf.close();rec.lastTs=ts;if(key)rec.lastKey=ts;
 }
 // real-time capture: called after every map render while recording
-function captureLive(){
-  const rec=state.rec;if(!rec||!rec.rt||!state.playing||rec.err)return;
-  const ts=Math.round(state.T*1e6);if(ts<=rec.lastTs)return;
-  if(rec.enc.encodeQueueSize>30)return;               // encoder busy: drop this frame rather than stall playback
-  encodeFrame(ts,ts-rec.lastKey>=2e6);
-}
+function captureLive(){if(state.rec&&state.rec.live&&recCtx)compose()}
 async function finishRec(){
   const rec=state.rec;if(!rec||rec.done)return;rec.done=true;setPlaying(false);
   try{await rec.enc.flush()}catch(e){rec.err=rec.err||e}
@@ -574,7 +628,7 @@ async function finishRec(){
   const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.mp4`;
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
-function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.rt)finishRec()}
+function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.live){setPlaying(false);if(r.mr&&r.mr.state!=='inactive')r.mr.stop();else{state.rec=null;setRecUI(false,'錄成影片')}}}
 function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open,#play').forEach(el=>el.disabled=!on)}
 
 /* ---------------- UI ---------------- */
