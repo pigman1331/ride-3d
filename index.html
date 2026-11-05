@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>騎行 3D 路線動畫</title>
+<meta name="description" content="把 Bryton / Garmin 的 FIT 或 GPX 騎行紀錄做成 3D 地形路線動畫">
+<style>body{margin:0;font-size:14px}</style>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+/* Layout: one-screen player — stage (map + HUD canvas) fills the screen, control dock pinned below */
+:root{
+  --ink:#0d1117; --panel:#161c24; --line:#2a3340; --text:#e8edf2; --muted:#8a96a6;
+  --amber:#ffb547; --cyan:#57d3e6; --danger:#ff5d5d;
+  --f-num:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+  color-scheme:dark;
+}
+html,body{height:100%}
+[hidden]{display:none!important}
+body{background:var(--ink);color:var(--text);font-family:var(--f-body);overflow:hidden}
+#app{height:100%;display:grid;grid-template-rows:1fr auto}
+#stage{position:relative;min-height:0;display:grid;place-items:center;overflow:hidden;background:#05070a}
+#frame{position:relative;width:100%;height:100%;overflow:hidden}
+#map,#hud{position:absolute;inset:0}
+#hud{pointer-events:none;width:100%;height:100%}
+#scrubzone{position:absolute;left:0;right:0;bottom:0;height:22%;cursor:ew-resize;touch-action:none}
+.maplibregl-ctrl-attrib{font-size:10px;background:rgba(0,0,0,.45)!important}
+.maplibregl-ctrl-attrib a{color:#cfd6de!important}
+#loading{position:absolute;inset:0;display:grid;place-items:center;background:var(--ink);z-index:5;font-size:15px;color:var(--muted);transition:opacity .5s}
+#loading b{display:block;font-family:var(--f-num);font-size:40px;letter-spacing:.04em;color:var(--text);margin-bottom:6px;font-weight:600}
+#loading.gone{opacity:0;pointer-events:none}
+#dock{background:var(--panel);border-top:1px solid var(--line);
+  padding-block:10px calc(10px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
+.grp{display:flex;align-items:center;gap:8px;min-width:0}
+.grow{flex:1 1 260px}
+button,select,input[type=text]{font:inherit;font-size:13px;color:var(--text);background:#1f2731;border:1px solid var(--line);border-radius:6px;height:34px;padding:0 12px}
+button{cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+button:hover{border-color:#4a5768}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+#play{width:44px;padding:0;justify-content:center;background:var(--amber);color:#1a1205;border-color:var(--amber)}
+#play svg{width:16px;height:16px}
+#rec{border-color:#5a2a2a}
+#rec .dot{width:9px;height:9px;border-radius:50%;background:var(--danger)}
+#rec.on{background:var(--danger);color:#fff;border-color:var(--danger)}
+#rec.on .dot{background:#fff}
+input[type=range]{flex:1;min-width:80px;accent-color:var(--amber)}
+#tlabel{font-family:var(--f-num);font-size:16px;font-variant-numeric:tabular-nums;color:var(--muted);min-width:86px;text-align:right}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0;height:32px;background:transparent;color:var(--muted)}
+.seg button[aria-pressed=true]{background:#2b3542;color:var(--text)}
+label.sm{font-size:12px;color:var(--muted)}
+#title{width:150px}
+#toast{position:absolute;left:50%;top:calc(14px + env(safe-area-inset-top,0px));transform:translateX(-50%);background:rgba(13,17,23,.92);border:1px solid var(--line);padding:8px 14px;border-radius:8px;font-size:13px;z-index:6;max-width:min(90%,520px);text-align:center}
+#drop{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:rgba(13,17,23,.82);border:2px dashed var(--amber);font-size:18px}
+@media (max-width:640px){#title{width:110px}.hide-sm{display:none}}
+@media (prefers-reduced-motion:reduce){#loading{transition:none}}
+</style>
+
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="frame">
+      <div id="map"></div>
+      <canvas id="hud"></canvas>
+      <div id="scrubzone" title="拖曳調整播放位置"></div>
+    </div>
+    <div id="loading"><div style="text-align:center"><b>載入地形中</b><span id="loadmsg">衛星影像與騎行紀錄準備中…</span></div></div>
+    <div id="toast" hidden></div>
+    <div id="drop" hidden>放開以載入 FIT / GPX 檔</div>
+  </div>
+  <div id="dock">
+    <div class="grp grow">
+      <button id="play" aria-label="播放"><svg viewBox="0 0 16 16"><path id="playicon" d="M4 2l10 6-10 6z" fill="currentColor"/></svg></button>
+      <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="播放位置">
+      <span id="tlabel">0:00</span>
+    </div>
+    <div class="grp">
+      <div class="seg" role="group" aria-label="兩段紀錄的接法">
+        <button id="m-seam" aria-pressed="true">無縫接續</button>
+        <button id="m-split" aria-pressed="false">分段標示</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="sm" for="dur">長度</label>
+      <select id="dur"><option value="30">30 秒</option><option value="45">45 秒</option><option value="60" selected>60 秒</option><option value="90">90 秒</option><option value="120">2 分鐘</option></select>
+      <label class="sm" for="aspect">比例</label>
+      <select id="aspect"><option value="fill">填滿</option><option value="16:9">16:9</option><option value="9:16">9:16 直式</option><option value="1:1">1:1</option></select>
+    </div>
+    <div class="grp">
+      <label class="sm hide-sm" for="title">標題</label>
+      <input type="text" id="title" value="晨騎・內湖山區" maxlength="24">
+      <button id="rec"><span class="dot"></span><span id="rectext">錄成影片</span></button>
+      <button id="open">換檔案</button>
+      <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+// Minimal FIT reader: returns record messages as [unix, lat, lon, alt, distM, kmh, hr, cad, pwr, temp]
+function parseFIT(buf){
+  const dv=new DataView(buf);const hs=dv.getUint8(0);const dataSize=dv.getUint32(4,true);
+  const sig=String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
+  if(sig!=='.FIT')throw new Error('不是有效的 FIT 檔');
+  let p=hs;const end=Math.min(hs+dataSize,buf.byteLength);const defs={};let lastTs=0;const out=[];
+  const S=180/2147483648, EPOCH=631065600;
+  function rd(off,size,bt,le){
+    const t=bt&0x1F;
+    if(size===1){const v=dv.getUint8(off);if(t===1){return v===0x7F?null:(v>127?v-256:v)}return v===0xFF?null:v}
+    if(size===2){if(t===3){const v=dv.getInt16(off,le);return v===0x7FFF?null:v}const v=dv.getUint16(off,le);return v===0xFFFF?null:v}
+    if(size===4){if(t===5){const v=dv.getInt32(off,le);return v===0x7FFFFFFF?null:v}const v=dv.getUint32(off,le);return v===0xFFFFFFFF?null:v}
+    return null;
+  }
+  while(p<end){
+    const h=dv.getUint8(p++);let local,tsOff=null;
+    if(h&0x80){local=(h>>5)&3;tsOff=h&0x1F}
+    else if(h&0x40){
+      local=h&0xF;const dev=h&0x20;p++;const le=dv.getUint8(p++)===0;const g=le?dv.getUint16(p,true):dv.getUint16(p,false);p+=2;
+      const n=dv.getUint8(p++);const fields=[];let len=0;
+      for(let i=0;i<n;i++){fields.push([dv.getUint8(p),dv.getUint8(p+1),dv.getUint8(p+2)]);len+=dv.getUint8(p+1);p+=3}
+      if(dev){const nd=dv.getUint8(p++);for(let i=0;i<nd;i++){len+=dv.getUint8(p+1);p+=3}}
+      defs[local]={g,le,fields,len};continue;
+    } else local=h&0xF;
+    const d=defs[local];if(!d)throw new Error('FIT 格式錯誤');
+    if(d.g===20){
+      const f={};let o=p;
+      for(const [num,size,bt] of d.fields){f[num]=rd(o,size,bt,d.le);o+=size}
+      let ts=f[253];
+      if(ts!=null)lastTs=ts;
+      else if(tsOff!=null){ts=(lastTs&~0x1F)+tsOff;if(tsOff<(lastTs&0x1F))ts+=0x20;lastTs=ts}
+      if(f[0]!=null&&f[1]!=null&&ts){
+        const alt=f[78]!=null?f[78]/5-500:(f[2]!=null?f[2]/5-500:null);
+        const spd=f[73]!=null?f[73]/1000:(f[6]!=null?f[6]/1000:null);
+        out.push([ts+EPOCH,f[0]*S,f[1]*S,alt,f[5]!=null?f[5]/100:null,spd!=null?spd*3.6:null,f[3]||0,f[4]||0,f[7]||0,f[13]==null?null:f[13]]);
+      }
+    } else if(tsOff!=null){lastTs=(lastTs&~0x1F)+tsOff}
+    p+=d.len;
+  }
+  return out;
+}
+
+
+
+/* ---------------- ride model ---------------- */
+const R=6371000,rad=Math.PI/180;
+function hav(a,b,c,d){const x=Math.sin((c-a)*rad/2)**2+Math.cos(a*rad)*Math.cos(c*rad)*Math.sin((d-b)*rad/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
+function bearing(a,b,c,d){const y=Math.sin((d-b)*rad)*Math.cos(c*rad),x=Math.cos(a*rad)*Math.sin(c*rad)-Math.sin(a*rad)*Math.cos(c*rad)*Math.cos((d-b)*rad);return Math.atan2(y,x)/rad}
+function parseGPX(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml');const pts=[...doc.getElementsByTagName('trkpt')];
+  const v=(el,tag)=>{const n=el.getElementsByTagNameNS('*',tag)[0];return n?parseFloat(n.textContent):null};
+  return pts.map(p=>{const t=p.getElementsByTagName('time')[0];return [t?Date.parse(t.textContent)/1000:0,+p.getAttribute('lat'),+p.getAttribute('lon'),v(p,'ele'),null,null,v(p,'hr')||0,v(p,'cad')||0,v(p,'power')||0,v(p,'atemp')]}).filter(r=>r[0]);
+}
+// rows: [unix, lat, lon, alt, distM, kmh, hr, cad, pwr, temp]
+function cleanSegment(rows){
+  rows.sort((a,b)=>a[0]-b[0]);let d=0;
+  for(let i=0;i<rows.length;i++){
+    const r=rows[i];if(i){const p=rows[i-1];const dd=hav(p[1],p[2],r[1],r[2]);if(r[4]==null)r[4]=d+dd;d=r[4]||d+dd;
+      if(r[5]==null){const dt=Math.max(1,r[0]-p[0]);r[5]=dd/dt*3.6}}else{if(r[4]==null)r[4]=0;if(r[5]==null)r[5]=0}
+    if(r[3]==null)r[3]=i?rows[i-1][3]:0;
+  }
+  return rows;
+}
+let RIDE=null;
+function buildRide(segs){
+  segs=segs.filter(s=>s.length>1).sort((a,b)=>a[0][0]-b[0][0]);
+  const P=[];let a=0,dOff=0;const segInfo=[];
+  segs.forEach((rows,si)=>{
+    const start=P.length;
+    // smooth speed a little (5 pts)
+    for(let i=0;i<rows.length;i++){
+      const r=rows[i];
+      if(i){const dt=r[0]-rows[i-1][0];a+=Math.min(Math.max(dt,0),5)}
+      let s=0,n=0;for(let k=-2;k<=2;k++){const q=rows[i+k];if(q){s+=q[5];n++}}
+      P.push({t:r[0],lat:r[1],lng:r[2],alt:r[3],d:(r[4]+dOff)/1000,v:s/n,hr:r[6],cad:r[7],pw:r[8],tmp:r[9],seg:si,a});
+    }
+    dOff+=rows[rows.length-1][4];
+    segInfo.push({i0:start,i1:P.length-1,a0:P[start].a,a1:P[P.length-1].a,t0:rows[0][0],t1:rows[rows.length-1][0]});
+    a+=1;
+  });
+  let up=0,ref=P[0].alt,maxAlt=-1e9,maxV=0,hrS=0,hrN=0,moving=0;
+  for(let i=0;i<P.length;i++){const p=P[i];
+    if(p.alt>ref+3){up+=p.alt-ref;ref=p.alt}else if(p.alt<ref-3)ref=p.alt;
+    maxAlt=Math.max(maxAlt,p.alt);maxV=Math.max(maxV,p.v);if(p.hr){hrS+=p.hr;hrN++}}
+  segInfo.forEach(s=>moving+=s.t1-s.t0);
+  let minLat=90,maxLat=-90,minLng=180,maxLng=-180;
+  for(const p of P){minLat=Math.min(minLat,p.lat);maxLat=Math.max(maxLat,p.lat);minLng=Math.min(minLng,p.lng);maxLng=Math.max(maxLng,p.lng)}
+  const altMin=Math.min(...P.map(p=>p.alt));
+  return {P,segs:segInfo,A:P[P.length-1].a,dist:P[P.length-1].d,up,maxAlt,altMin,maxV,avgHr:hrN?hrS/hrN:0,moving,
+    bounds:[[minLng,minLat],[maxLng,maxLat]],hasHr:hrN>0,hasPw:P.some(p=>p.pw>0),hasCad:P.some(p=>p.cad>0)};
+}
+function sampleAt(a){
+  const P=RIDE.P;let lo=0,hi=P.length-1;
+  if(a<=P[0].a)return{...P[0],k:0};if(a>=P[hi].a)return{...P[hi],k:hi};
+  while(hi-lo>1){const m=(lo+hi)>>1;if(P[m].a<=a)lo=m;else hi=m}
+  const p=P[lo],q=P[hi];if(p.seg!==q.seg)return{...p,k:lo};
+  const f=(a-p.a)/((q.a-p.a)||1),L=(x,y)=>x+(y-x)*f;
+  return{...p,lat:L(p.lat,q.lat),lng:L(p.lng,q.lng),alt:L(p.alt,q.alt),d:L(p.d,q.d),v:L(p.v,q.v),hr:Math.round(L(p.hr,q.hr)),pw:Math.round(L(p.pw,q.pw)),cad:Math.round(L(p.cad,q.cad)),t:L(p.t,q.t),k:lo,f};
+}
+
+/* ---------------- timeline ---------------- */
+const INTRO=4.5,OUTRO=6,PAUSE=2.6;
+const state={dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
+function pauses(){return state.mode==='split'?RIDE.segs.slice(0,-1).map(s=>s.a1):[]}
+function total(){return INTRO+state.dur+pauses().length*PAUSE+OUTRO}
+// map timeline T -> {phase, a, pauseIdx}
+function phaseAt(T){
+  if(T<INTRO)return{phase:'intro',u:T/INTRO,a:0};
+  let t=T-INTRO;const sc=RIDE.A/state.dur;let a=0;const ps=pauses();
+  for(let i=0;i<ps.length;i++){
+    const need=(ps[i]-a)/sc;
+    if(t<need)return{phase:'ride',a:a+t*sc};
+    t-=need;a=ps[i];
+    if(t<PAUSE)return{phase:'pause',a,pi:i,u:t/PAUSE};
+    t-=PAUSE;a=RIDE.segs[i+1].a0;
+  }
+  const need=(RIDE.A-a)/sc;
+  if(t<need)return{phase:'ride',a:a+t*sc};
+  t-=need;return{phase:'outro',a:RIDE.A,u:Math.min(1,t/OUTRO)};
+}
+
+/* ---------------- map ---------------- */
+const map=new maplibregl.Map({
+  container:'map',preserveDrawingBuffer:true,attributionControl:false,maxPitch:80,minZoom:3,
+  style:{version:8,
+    sources:{
+      sat:{type:'raster',tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],tileSize:256,maxzoom:18},
+      dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],tileSize:256,maxzoom:14,encoding:'terrarium'},
+      dem2:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],tileSize:256,maxzoom:14,encoding:'terrarium'}
+    },
+    sky:{'sky-color':'#24406b','horizon-color':'#f2c99a','fog-color':'#d9b48e','sky-horizon-blend':.55,'horizon-fog-blend':.7,'fog-ground-blend':.35,'atmosphere-blend':['interpolate',['linear'],['zoom'],0,1,12,.6,15,.3]},
+    layers:[{id:'bg',type:'background',paint:{'background-color':'#1d2630'}},
+      {id:'sat',type:'raster',source:'sat',paint:{'raster-saturation':-.08,'raster-contrast':.06}},
+      {id:'shade',type:'hillshade',source:'dem2',paint:{'hillshade-exaggeration':.25,'hillshade-shadow-color':'#0b1420','hillshade-highlight-color':'#fff3e0','hillshade-illumination-direction':300}}],
+    terrain:{source:'dem',exaggeration:1.35}
+  },
+  center:[121.577,25.11],zoom:12.5,pitch:50
+});
+
+
+function lineFeature(pts,seg){return{type:'Feature',properties:{seg},geometry:{type:'LineString',coordinates:pts}}}
+function routeFC(){
+  const fs=RIDE.segs.map((s,i)=>lineFeature(RIDE.P.slice(s.i0,s.i1+1).map(p=>[p.lng,p.lat]),i));
+  if(state.mode==='seam'&&RIDE.segs.length>1){ // bridge the gap in seamless mode
+    for(let i=0;i<RIDE.segs.length-1;i++){const a=RIDE.P[RIDE.segs[i].i1],b=RIDE.P[RIDE.segs[i+1].i0];fs.push(lineFeature([[a.lng,a.lat],[b.lng,b.lat]],0))}
+  }
+  return{type:'FeatureCollection',features:fs};
+}
+function doneFC(cur){
+  const fs=[];
+  RIDE.segs.forEach((s,i)=>{
+    if(cur.k<s.i0)return;
+    const end=Math.min(cur.k,s.i1);const c=RIDE.P.slice(s.i0,end+1).map(p=>[p.lng,p.lat]);
+    if(cur.k>=s.i0&&cur.k<=s.i1)c.push([cur.lng,cur.lat]);
+    if(c.length>1)fs.push(lineFeature(c,state.mode==='split'?i:0));
+  });
+  return{type:'FeatureCollection',features:fs};
+}
+const segColor=['match',['get','seg'],1,'#57d3e6',2,'#c59bff','#ffb547'];
+function addRouteLayers(){
+  map.addSource('route',{type:'geojson',data:routeFC()});
+  map.addSource('done',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({id:'route-base',type:'line',source:'route',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':'#ffffff','line-opacity':.38,'line-width':3}});
+  map.addLayer({id:'done-glow',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':segColor,'line-width':14,'line-blur':10,'line-opacity':.55}});
+  map.addLayer({id:'done',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':segColor,'line-width':4.5}});
+}
+function refreshRoute(){if(map.getSource('route'))map.getSource('route').setData(routeFC())}
+
+/* ---------------- camera ---------------- */
+let overview=null;
+function computeOverview(){
+  const c=map.cameraForBounds(RIDE.bounds,{padding:{top:60,bottom:map.getContainer().clientHeight*.28,left:40,right:40}});
+  overview={center:[c.center.lng,c.center.lat],zoom:(c.zoom||12.5)-.25,pitch:48};
+}
+const ease=u=>u<.5?4*u*u*u:1-Math.pow(-2*u+2,3)/2;
+function angLerp(a,b,u){let d=((b-a+540)%360)-180;return a+d*u}
+function targetBearing(a){
+  const sc=RIDE.A/state.dur;const p=sampleAt(a),q=sampleAt(Math.min(RIDE.A,a+Math.max(60,sc*1.1)));
+  const r=sampleAt(Math.max(0,a-20));
+  return bearing(r.lat,r.lng,q.lat,q.lng);
+}
+function rideZoom(){const h=map.getContainer().clientHeight,w=map.getContainer().clientWidth;return 14.35+Math.log2(Math.min(w,h)/700)*.6}
+function rideCam(p,b){return{center:[p.lng,p.lat],zoom:rideZoom(),pitch:64,bearing:b}}
+function applyCam(c){
+  const h=map.getContainer().clientHeight;
+  map.jumpTo({center:c.center,zoom:c.zoom,pitch:c.pitch,bearing:c.bearing,padding:{top:h*c.padTop||0,bottom:0,left:0,right:0}});
+}
+function lerpCam(a,b,u){return{center:[a.center[0]+(b.center[0]-a.center[0])*u,a.center[1]+(b.center[1]-a.center[1])*u],zoom:a.zoom+(b.zoom-a.zoom)*u,pitch:a.pitch+(b.pitch-a.pitch)*u,bearing:angLerp(a.bearing,b.bearing,u),padTop:(a.padTop||0)+((b.padTop||0)-(a.padTop||0))*u}}
+
+let cur=null,ph=null;
+function update(dt,snap){
+  ph=phaseAt(state.T);cur=sampleAt(ph.a);
+  const tb=targetBearing(ph.a);
+  if(snap||ph.phase==='intro')state.bearing=tb;
+  else if(ph.phase==='ride'){const k=1-Math.exp(-dt/0.9);state.bearing=angLerp(state.bearing,tb,k)}
+  let cam;
+  if(ph.phase==='intro'){
+    const ov={...overview,bearing:tb-35+ph.u*15,padTop:0};
+    const st={...rideCam(cur,tb),padTop:.32};
+    const u=Math.max(0,(ph.u-.3)/.7);cam=lerpCam(ov,st,ease(u));
+    if(ph.u<.3)cam=ov;
+  }else if(ph.phase==='outro'){
+    const st={...rideCam(cur,state.bearing),padTop:.32};
+    const ov={...overview,bearing:state.bearing+40,padTop:0};
+    cam=lerpCam(st,ov,ease(Math.min(1,ph.u*1.4)));
+  }else cam={...rideCam(cur,state.bearing),padTop:.32};
+  applyCam(cam);
+  map.getSource('done').setData(doneFC(ph.phase==='intro'?{...cur,k:-1}:cur));
+}
+
+/* ---------------- HUD (drawn on canvas so recordings include it) ---------------- */
+const hud=document.getElementById('hud'),hg=hud.getContext('2d');
+let W=0,H=0,DPR=1;
+function sizeHud(){const r=hud.getBoundingClientRect();DPR=Math.min(2,window.devicePixelRatio||1);W=r.width;H=r.height;hud.width=Math.round(W*DPR);hud.height=Math.round(H*DPR)}
+const fmtT=s=>{s=Math.max(0,Math.round(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${m}:${String(x).padStart(2,'0')}`};
+const clock=t=>new Date(t*1000).toLocaleTimeString('zh-TW',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hour12:false});
+const dateStr=t=>{const d=new Date(t*1000);return d.toLocaleDateString('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short'})};
+function rr(x,y,w,h,r){hg.beginPath();hg.roundRect(x,y,w,h,r)}
+function pin(lng,lat,label,color,s){
+  const p=map.project([lng,lat]);if(p.x<-50||p.y<-50||p.x>W+50||p.y>H+50)return;
+  hg.font=`600 ${13*s}px ${getComputedStyle(document.documentElement).getPropertyValue('--f-body')}`;
+  const tw=hg.measureText(label).width+16*s,bh=24*s;
+  hg.fillStyle='rgba(13,17,23,.82)';rr(p.x-tw/2,p.y-bh-16*s,tw,bh,6*s);hg.fill();
+  hg.strokeStyle=color;hg.lineWidth=1.5*s;hg.stroke();
+  hg.beginPath();hg.moveTo(p.x,p.y-16*s);hg.lineTo(p.x,p.y);hg.stroke();
+  hg.fillStyle='#e8edf2';hg.textAlign='center';hg.textBaseline='middle';hg.fillText(label,p.x,p.y-bh/2-16*s);
+}
+const FB=()=>getComputedStyle(document.documentElement).getPropertyValue('--f-body');
+const FN='"Barlow Condensed","Arial Narrow",sans-serif';
+function drawHud(){
+  if(!cur)return;const fb=FB();
+  hg.setTransform(DPR,0,0,DPR,0,0);hg.clearRect(0,0,W,H);
+  const s=Math.max(.62,Math.min(1.25,Math.min(W,H)/720));const pad=20*s;
+  // vignettes
+  let g=hg.createLinearGradient(0,0,0,H*.28);g.addColorStop(0,'rgba(5,8,12,.62)');g.addColorStop(1,'rgba(5,8,12,0)');hg.fillStyle=g;hg.fillRect(0,0,W,H*.28);
+  g=hg.createLinearGradient(0,H*.55,0,H);g.addColorStop(0,'rgba(5,8,12,0)');g.addColorStop(1,'rgba(5,8,12,.78)');hg.fillStyle=g;hg.fillRect(0,H*.55,W,H*.45);
+  // pins: start, junctions, finish
+  const P=RIDE.P;
+  pin(P[0].lng,P[0].lat,'起點','#ffb547',s);
+  if(state.mode==='split')RIDE.segs.slice(0,-1).forEach((sg,i)=>{const p=P[sg.i1];pin(p.lng,p.lat,`休息 ${fmtT(RIDE.segs[i+1].t0-sg.t1)}`,'#57d3e6',s)});
+  if(ph.phase==='outro'){const p=P[P.length-1];pin(p.lng,p.lat,'終點','#ffb547',s)}
+  // rider
+  if(ph.phase!=='intro'){
+    const q=map.project([cur.lng,cur.lat]);const col=state.mode==='split'&&cur.seg===1?'#57d3e6':'#ffb547';
+    const pulse=(performance.now()/900)%1;
+    hg.beginPath();hg.arc(q.x,q.y,(9+pulse*16)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.35*(1-pulse)})`;hg.fill();
+    hg.beginPath();hg.arc(q.x,q.y,8*s,0,7);hg.fillStyle='#fff';hg.fill();
+    hg.beginPath();hg.arc(q.x,q.y,5.5*s,0,7);hg.fillStyle=col;hg.fill();
+  }
+  // title block
+  hg.textAlign='left';hg.textBaseline='alphabetic';hg.fillStyle='#fff';
+  hg.font=`700 ${26*s}px ${fb}`;hg.fillText(state.title||'騎行紀錄',pad,pad+24*s);
+  hg.font=`500 ${13*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.78)';
+  const t0=RIDE.segs[0].t0;
+  let sub=`${dateStr(t0)}  ${clock(t0)} 出發`;if(RIDE.segs.length>1)sub+=`  ·  ${RIDE.segs.length} 段紀錄`;
+  hg.fillText(sub,pad,pad+46*s);
+  // clock top-right
+  hg.textAlign='right';hg.font=`600 ${30*s}px ${FN}`;hg.fillStyle='#fff';
+  hg.fillText(clock(ph.phase==='intro'?t0:cur.t),W-pad,pad+26*s);
+  hg.font=`500 ${12*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.7)';
+  let tag='';if(state.mode==='split'&&RIDE.segs.length>1)tag=`第 ${cur.seg+1} 段`;
+  if(ph.phase==='pause')tag=`休息中 ${fmtT(RIDE.segs[ph.pi+1].t0-RIDE.segs[ph.pi].t1)}`;
+  if(tag)hg.fillText(tag,W-pad,pad+46*s);
+  // profile
+  const pw=W-pad*2,phh=Math.max(46,H*.12),py=H-pad-phh;
+  drawProfile(pad,py,pw,phh,s,fb);
+  // stats row
+  const stats=[['時速',cur.v.toFixed(1),'km/h'],['距離',cur.d.toFixed(2),'km'],['海拔',Math.round(cur.alt),'m']];
+  if(RIDE.hasHr)stats.push(['心率',cur.hr||'—','bpm']);
+  if(RIDE.hasPw&&W>480)stats.push(['功率',cur.pw||'0','W']);
+  if(RIDE.hasCad&&W>560)stats.push(['踏頻',cur.cad||'0','rpm']);
+  const cols=stats.length,cw=pw/cols,sy=py-14*s;
+  stats.forEach((st,i)=>{
+    const x=pad+i*cw;hg.textAlign='left';
+    hg.font=`500 ${11.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.66)';hg.fillText(st[0],x,sy-44*s);
+    const nf=W<480?.82:1;hg.font=`600 ${(i===0?42:36)*s*nf}px ${FN}`;hg.fillStyle=i===0?'#ffb547':'#fff';
+    const vs=String(st[1]);hg.fillText(vs,x,sy-6*s);const vw=hg.measureText(vs).width;
+    hg.font=`500 ${13*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.7)';hg.fillText(st[2],x+vw+4*s,sy-6*s);
+  });
+  // tiny credit (kept in recordings)
+  hg.textAlign='right';hg.font=`400 ${9*s}px ${fb}`;hg.fillStyle='rgba(255,255,255,.45)';
+  hg.fillText('Imagery © Esri, Maxar, Earthstar Geographics · Terrain © Mapzen / AWS',W-pad,H-6*s);
+  if(ph.phase==='outro')drawSummary(s,fb,ph.u);
+  if(state.rec){hg.textAlign='left';hg.fillStyle='#ff5d5d';hg.beginPath();hg.arc(pad+5*s,pad+66*s,5*s,0,7);hg.fill()}
+}
+function drawProfile(x,y,w,h,s,fb){
+  const P=RIDE.P,D=RIDE.dist,lo=RIDE.altMin,hi=RIDE.maxAlt,span=Math.max(50,hi-lo);
+  const X=d=>x+d/D*w,Y=a=>y+h-(a-lo)/span*h*.92;
+  const step=Math.max(1,Math.floor(P.length/600));
+  const path=(upto)=>{hg.beginPath();hg.moveTo(x,y+h);for(let i=0;i<P.length;i+=step){if(P[i].d>upto)break;hg.lineTo(X(P[i].d),Y(P[i].alt))}};
+  path(1e9);hg.lineTo(x+w,y+h);hg.closePath();hg.fillStyle='rgba(255,255,255,.14)';hg.fill();
+  path(1e9);hg.strokeStyle='rgba(255,255,255,.45)';hg.lineWidth=1.2*s;hg.stroke();
+  if(ph.phase!=='intro'){
+    hg.save();hg.beginPath();hg.rect(x,y-4,X(cur.d)-x,h+8);hg.clip();
+    path(1e9);hg.lineTo(x+w,y+h);hg.closePath();
+    const g=hg.createLinearGradient(0,y,0,y+h);g.addColorStop(0,'rgba(255,181,71,.75)');g.addColorStop(1,'rgba(255,181,71,.15)');hg.fillStyle=g;hg.fill();
+    path(1e9);hg.strokeStyle='#ffb547';hg.lineWidth=2*s;hg.stroke();hg.restore();
+  }
+  // segment boundaries
+  RIDE.segs.slice(0,-1).forEach(sg=>{const xx=X(P[sg.i1].d);hg.setLineDash([3*s,3*s]);hg.strokeStyle='rgba(87,211,230,.8)';hg.lineWidth=1*s;hg.beginPath();hg.moveTo(xx,y);hg.lineTo(xx,y+h);hg.stroke();hg.setLineDash([])});
+  // axis labels
+  hg.font=`500 ${10*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.6)';hg.textAlign='left';
+  hg.fillText(Math.round(hi)+' m',x+2,y+9*s);
+  hg.textAlign='right';hg.fillText(D.toFixed(1)+' km',x+w,y+h-3*s);
+  if(ph.phase!=='intro'){const cx=X(cur.d),cy=Y(cur.alt);hg.beginPath();hg.arc(cx,cy,4.5*s,0,7);hg.fillStyle='#fff';hg.fill();hg.strokeStyle='#ffb547';hg.lineWidth=2*s;hg.stroke()}
+}
+function drawSummary(s,fb,u){
+  const a=Math.min(1,Math.max(0,(u-.35)/.3));if(a<=0)return;
+  hg.globalAlpha=a;
+  const items=[['總距離',RIDE.dist.toFixed(1)+' km'],['總爬升',Math.round(RIDE.up)+' m'],['騎乘時間',fmtT(RIDE.moving)],['最高海拔',Math.round(RIDE.maxAlt)+' m']];
+  const narrow0=W<520;if(RIDE.hasHr&&!narrow0)items.push(['平均心率',Math.round(RIDE.avgHr)+' bpm']);
+  const narrow=W<520;const cols=narrow?2:items.length;const rows=Math.ceil(items.length/cols);
+  const cw=Math.min(150*s,(W-60*s)/cols),bw=cw*cols+32*s,bh=rows*62*s+30*s;
+  const bx=(W-bw)/2,by=Math.max(H*.14,H*.3-bh/2);
+  hg.fillStyle='rgba(13,17,23,.84)';rr(bx,by,bw,bh,12*s);hg.fill();hg.strokeStyle='rgba(255,181,71,.6)';hg.lineWidth=1;hg.stroke();
+  items.forEach((it,i)=>{const cx=bx+16*s+(i%cols)*cw+cw/2,cy=by+18*s+Math.floor(i/cols)*62*s;
+    hg.textAlign='center';hg.font=`500 ${11.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.66)';hg.fillText(it[0],cx,cy+12*s);
+    hg.font=`600 ${30*s}px ${FN}`;hg.fillStyle=i===1?'#ffb547':'#fff';hg.fillText(it[1],cx,cy+44*s)});
+  hg.globalAlpha=1;
+}
+
+/* ---------------- loop ---------------- */
+const playBtn=document.getElementById('play'),scrub=document.getElementById('scrub'),tlabel=document.getElementById('tlabel');
+function setPlaying(v){state.playing=v;document.getElementById('playicon').setAttribute('d',v?'M3 2h4v12H3zM9 2h4v12H9z':'M4 2l10 6-10 6z');playBtn.setAttribute('aria-label',v?'暫停':'播放')}
+function syncUI(){const tt=total();scrub.value=Math.round(state.T/tt*1000);tlabel.textContent=`${fmtT(state.T)} / ${fmtT(tt)}`}
+let lastFrame=performance.now();
+function frame(now){
+  const dt=Math.min(.25,(now-lastFrame)/1000);lastFrame=now;
+  if(RIDE&&overview){
+    if(state.playing){state.T+=dt;if(state.T>=total()){state.T=total();setPlaying(false);if(state.rec)stopRec()}
+      update(dt,false);syncUI();}
+    else if(cur)map.triggerRepaint&&pulseTick(now);
+  }
+  requestAnimationFrame(frame);
+}
+map.on('render',()=>{drawHud();if(state.rec)compose()});
+let lastPulse=0;function pulseTick(now){if(now-lastPulse>60){lastPulse=now;drawHud()}}
+function seek(T){state.T=Math.max(0,Math.min(total(),T));if(RIDE&&overview){update(0,true);syncUI()}}
+
+/* ---------------- recording ---------------- */
+let recCanvas,recCtx,recorder,chunks=[],downloads=null;
+
+function compose(){const mc=map.getCanvas();if(recCanvas.width!==mc.width){recCanvas.width=mc.width;recCanvas.height=mc.height}
+  recCtx.drawImage(mc,0,0);recCtx.drawImage(hud,0,0,recCanvas.width,recCanvas.height)}
+function pickMime(){for(const m of['video/mp4;codecs=avc1.640028','video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm'])if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m))return m;return null}
+async function startRec(){
+  const mime=pickMime();if(!mime||!HTMLCanvasElement.prototype.captureStream){toast('這個瀏覽器不支援錄影，請改用電腦版 Chrome 或 Edge。');return}
+  const mc=map.getCanvas();recCanvas=document.createElement('canvas');recCanvas.width=mc.width;recCanvas.height=mc.height;recCtx=recCanvas.getContext('2d');
+  setPlaying(false);seek(0);toast('準備地圖中…');
+  await new Promise(r=>{if(map.loaded()&&map.areTilesLoaded())r();else map.once('idle',r)});
+  compose();
+  const stream=recCanvas.captureStream(30);recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:12e6});chunks=[];
+  recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  recorder.onstop=saveRec;recorder.start(500);
+  state.rec={mime};document.getElementById('rec').classList.add('on');document.getElementById('rectext').textContent='停止錄影';
+  setDock(false);toast('錄影中，播完會自動停止');setPlaying(true);
+}
+function stopRec(){if(recorder&&recorder.state!=='inactive')recorder.stop();setPlaying(false)}
+async function saveRec(){
+  const mime=state.rec.mime;state.rec=null;document.getElementById('rec').classList.remove('on');document.getElementById('rectext').textContent='錄成影片';setDock(true);
+  const ext=mime.includes('mp4')?'mp4':'webm';const blob=new Blob(chunks,{type:mime.split(';')[0]});
+  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.${ext}`;
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
+}
+function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open').forEach(el=>el.disabled=!on)}
+
+/* ---------------- UI ---------------- */
+let toastT;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,3800)}
+playBtn.onclick=()=>{if(state.rec)return;if(state.T>=total())seek(0);setPlaying(!state.playing)};
+scrub.oninput=()=>{if(state.rec)return;seek(scrub.value/1000*total())};
+const sz=document.getElementById('scrubzone');let dragging=false;
+function zoneSeek(e){const r=sz.getBoundingClientRect();const pad=20*Math.max(.62,Math.min(1.25,Math.min(W,H)/720));
+  const u=Math.max(0,Math.min(1,(e.clientX-r.left-pad)/(r.width-pad*2)));
+  const d=u*RIDE.dist;const P=RIDE.P;let k=P.findIndex(p=>p.d>=d);if(k<0)k=P.length-1;
+  const a=P[k].a;let lo=INTRO,hi=total()-OUTRO;for(let i=0;i<40;i++){const m=(lo+hi)/2;if(phaseAt(m).a<a)lo=m;else hi=m}seek(hi)}
+sz.addEventListener('pointerdown',e=>{if(state.rec||!RIDE)return;dragging=true;sz.setPointerCapture(e.pointerId);zoneSeek(e)});
+sz.addEventListener('pointermove',e=>{if(dragging)zoneSeek(e)});
+sz.addEventListener('pointerup',()=>dragging=false);
+document.getElementById('dur').onchange=e=>{const u=state.T/total();state.dur=+e.target.value;seek(u*total())};
+function setMode(m){state.mode=m;document.getElementById('m-seam').setAttribute('aria-pressed',m==='seam');document.getElementById('m-split').setAttribute('aria-pressed',m==='split');refreshRoute();seek(Math.min(state.T,total()))}
+document.getElementById('m-seam').onclick=()=>setMode('seam');
+document.getElementById('m-split').onclick=()=>setMode('split');
+const titleEl=document.getElementById('title');state.title=titleEl.value;titleEl.oninput=()=>{state.title=titleEl.value;map.triggerRepaint()};
+document.getElementById('rec').onclick=()=>{if(state.rec)stopRec();else startRec()};
+function layout(){
+  const v=document.getElementById('aspect').value,fr=document.getElementById('frame'),st=document.getElementById('stage');
+  if(v==='fill'){fr.style.width='100%';fr.style.height='100%'}
+  else{const [a,b]=v.split(':').map(Number);const sw=st.clientWidth,sh=st.clientHeight;let w=sw,h=sw*b/a;if(h>sh){h=sh;w=sh*a/b}fr.style.width=w+'px';fr.style.height=h+'px'}
+  map.resize();sizeHud();if(RIDE){computeOverview();seek(state.T)}
+}
+document.getElementById('aspect').onchange=layout;
+window.addEventListener('resize',layout);
+document.getElementById('open').onclick=()=>document.getElementById('file').click();
+document.getElementById('file').onchange=e=>loadFiles([...e.target.files]);
+const drop=document.getElementById('drop');
+window.addEventListener('dragover',e=>{e.preventDefault();if(!state.rec)drop.hidden=false});
+drop.addEventListener('dragleave',()=>drop.hidden=true);
+window.addEventListener('drop',e=>{e.preventDefault();drop.hidden=true;if(!state.rec)loadFiles([...e.dataTransfer.files])});
+async function loadFiles(files){
+  files=files.filter(f=>/\.(fit|gpx)$/i.test(f.name));if(!files.length){toast('請選擇 .fit 或 .gpx 檔');return}
+  try{
+    const segs=[];for(const f of files){const rows=/\.gpx$/i.test(f.name)?parseGPX(await f.text()):parseFIT(await f.arrayBuffer());if(rows.length>1)segs.push(cleanSegment(rows))}
+    if(!segs.length)throw new Error('檔案裡沒有 GPS 軌跡');
+    setRide(buildRide(segs));
+    toast(`已載入 ${segs.length} 段紀錄`);
+  }catch(err){toast('讀取失敗：'+(err.message||'檔案格式不支援'))}
+}
+function setRide(r){RIDE=r;setPlaying(false);refreshRoute();computeOverview();state.T=0;update(0,true);syncUI();
+  document.getElementById('m-split').parentElement.style.opacity=RIDE.segs.length>1?1:.4}
+
+/* ---------------- boot ---------------- */
+(async()=>{
+  sizeHud();requestAnimationFrame(frame);
+  const segs=(await (await fetch('rides.json')).json()).map(cleanSegment);
+  await new Promise(r=>map.loaded()?r():map.on('load',r));
+  RIDE=buildRide(segs);addRouteLayers();computeOverview();layout();update(0,true);syncUI();
+  document.getElementById('loadmsg').textContent='準備完成';
+  const done=()=>{if(done.x)return;done.x=1;document.getElementById('loading').classList.add('gone');setTimeout(()=>{if(!state.T)setPlaying(true)},500)};
+  map.once('idle',done);setTimeout(done,12000);
+})();
+</script>
+
+</body>
+</html>
