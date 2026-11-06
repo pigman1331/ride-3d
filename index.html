@@ -625,9 +625,19 @@ async function pickConfig(w,h,top){
   }
   return null;
 }
+
+/* keep the screen awake while a recording runs (Screen Wake Lock API) */
+let wakeLock=null;
+async function keepAwake(on){
+  try{
+    if(on){if(!wakeLock&&navigator.wakeLock){wakeLock=await navigator.wakeLock.request('screen');wakeLock.addEventListener('release',()=>{wakeLock=null})}}
+    else if(wakeLock){await wakeLock.release();wakeLock=null}
+  }catch(e){wakeLock=null}
+}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&state.rec)keepAwake(true)});
 function waitRender(){return new Promise(r=>{map.once('render',r);map.triggerRepaint()})}
 function waitIdle(ms){return new Promise(r=>{let done=false;const f=()=>{if(!done){done=true;r()}};map.once('idle',f);setTimeout(f,ms)})}
-function setRecUI(on,text){const b=document.getElementById('rec');b.classList.toggle('on',on);document.getElementById('rectext').textContent=text;setDock(!on)}
+function setRecUI(on,text){keepAwake(on);const b=document.getElementById('rec');b.classList.toggle('on',on);document.getElementById('rectext').textContent=text;setDock(!on)}
 // shared remux: fragmented MP4 (MediaRecorder) -> regular faststart MP4
 function remuxMp4(buf){
   return new Promise((resolve,reject)=>{
