@@ -107,6 +107,8 @@ label.sm{font-size:12px;color:var(--muted)}
     <div class="grp">
       <label class="sm" for="hudmode">面板</label>
       <select id="hudmode"><option value="std">標準</option><option value="cockpit">座艙・變速</option></select>
+      <label class="sm" for="marker">標記</label>
+      <select id="marker"><option value="bike" selected>我的車</option><option value="dot">光點</option></select>
     </div>
     <div class="grp">
       <label class="sm hide-sm" for="title">標題</label>
@@ -242,7 +244,7 @@ function sampleAt(a){
 
 /* ---------------- timeline ---------------- */
 const INTRO=4.5,OUTRO=6,PAUSE=2.6;
-const state={speedX:0,hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
+const state={marker:'bike',speedX:0,hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
 function pauses(){return state.mode==='split'?RIDE.segs.slice(0,-1).map(s=>s.a1):[]}
 function total(){return INTRO+state.dur+pauses().length*PAUSE+OUTRO}
 // map timeline T -> {phase, a, pauseIdx}
@@ -372,6 +374,49 @@ function update(dt,snap){
 }
 
 /* ---------------- HUD (drawn on canvas so recordings include it) ---------------- */
+// side-view sprite of the user's bike: mint aero frame, deep carbon wheels, black kit
+function makeBikeSprite(){
+  const S=4,c=document.createElement('canvas');c.width=240*S;c.height=152*S;const g=c.getContext('2d');g.scale(S,S);
+  g.lineCap='round';g.lineJoin='round';
+  const MINT='#a9d8b4',MINT_D='#6f9e7b',BLK='#15171a',RIM='#3b4047';
+  const wheel=(x,y)=>{
+    g.beginPath();g.arc(x,y,44,0,7);g.strokeStyle=BLK;g.lineWidth=5.5;g.stroke();          // tire
+    g.beginPath();g.arc(x,y,39.5,0,Math.PI*2);g.moveTo(x+28,y);g.arc(x,y,28,0,Math.PI*2,true);g.fillStyle=RIM;g.fill(); // deep rim
+    g.beginPath();g.arc(x,y,39.5,0,7);g.strokeStyle='#5b616b';g.lineWidth=1;g.stroke();
+    g.strokeStyle='rgba(205,210,218,.75)';g.lineWidth=.8;
+    for(let i=0;i<12;i++){const a=i/12*Math.PI*2;g.beginPath();g.moveTo(x+Math.cos(a)*3,y+Math.sin(a)*3);g.lineTo(x+Math.cos(a)*28,y+Math.sin(a)*28);g.stroke()}
+    g.beginPath();g.arc(x,y,8.5,0,7);g.strokeStyle='#c9ced6';g.lineWidth=2;g.stroke();       // disc rotor
+    g.beginPath();g.arc(x,y,3,0,7);g.fillStyle=BLK;g.fill();
+  };
+  const tube=(pts,w,col)=>{g.beginPath();g.moveTo(...pts[0]);for(const p of pts.slice(1))g.lineTo(...p);g.strokeStyle=col;g.lineWidth=w;g.stroke()};
+  const RH=[58,104],FH=[184,104],BB=[114,108];
+  wheel(...RH);wheel(...FH);
+  // frame (outline pass then mint pass)
+  const frame=[[[BB,[104,52]],10],[[[104,54],[166,47]],8],[[BB,[170,62]],11],[[[105,66],RH],6],[[BB,RH],6],[[[168,44],[173,68]],10],[[[173,66],FH],7]];
+  for(const [p,w] of frame)tube(p,w+2.5,MINT_D);
+  for(const [p,w] of frame)tube(p,w,MINT);
+  // bottles: black on seat tube, clear on down tube
+  g.save();g.translate(124,82);g.rotate(-.2);g.fillStyle=BLK;g.beginPath();g.roundRect(-5,-16,10,30,3);g.fill();g.restore();
+  g.save();g.translate(144,80);g.rotate(-.75);g.fillStyle='rgba(235,240,245,.92)';g.beginPath();g.roundRect(-5,-15,10,28,3);g.fill();g.strokeStyle='#9aa3ad';g.lineWidth=.8;g.stroke();g.restore();
+  // drivetrain
+  g.beginPath();g.arc(...BB,13,0,7);g.fillStyle='#24272c';g.fill();g.strokeStyle='#8b929b';g.lineWidth=1.2;g.stroke();
+  tube([BB,[108,126]],4.5,BLK);
+  g.strokeStyle='rgba(170,176,185,.9)';g.lineWidth=1.3;g.beginPath();g.moveTo(114,95);g.lineTo(58,96);g.moveTo(114,121);g.lineTo(60,113);g.stroke();
+  g.beginPath();g.arc(...RH,10,0,7);g.fillStyle='#aeb4bc';g.fill();                       // cassette
+  tube([[62,108],[64,122]],4,BLK);                                                        // rear derailleur
+  // seatpost, saddle, saddle bag
+  tube([[104,52],[101,36]],6,BLK);
+  g.fillStyle=BLK;g.beginPath();g.moveTo(82,31);g.quadraticCurveTo(84,28,92,29);g.lineTo(116,31);g.quadraticCurveTo(119,32,116,35);g.lineTo(92,36);g.quadraticCurveTo(83,36,82,31);g.closePath();g.fill();
+  g.beginPath();g.roundRect(86,37,15,15,4);g.fill();
+  // stem + drop bars
+  tube([[167,44],[180,40]],5,BLK);
+  g.beginPath();g.moveTo(180,40);g.quadraticCurveTo(194,40,192,52);g.quadraticCurveTo(190,62,181,62);g.strokeStyle=BLK;g.lineWidth=4.5;g.stroke();
+  tube([[183,40],[190,32]],4,'#2a2d32');                                                  // shifter hood
+  return c;
+}
+
+let BIKE=null,bikeFace=1;
+
 const hud=document.getElementById('hud'),hg=hud.getContext('2d');
 let W=0,H=0,DPR=1;
 let hudDprOverride=null;
@@ -407,9 +452,22 @@ function drawHud(){
   if(ph.phase!=='intro'){
     const q=map.project([cur.lng,cur.lat]);const col=riderColor();
     const pulse=((hudClock??performance.now())/900)%1;
+    if(state.marker==='bike'){
+      if(!BIKE)BIKE=makeBikeSprite();
+      const ah=sampleAt(Math.min(RIDE.A,ph.a+Math.max(20,RIDE.A/state.dur*.4))),qa=map.project([ah.lng,ah.lat]);
+      if(Math.abs(qa.x-q.x)>2*s)bikeFace=qa.x>=q.x?1:-1;
+      const bw=74*s,bh=bw*152/240;
+      hg.beginPath();hg.ellipse(q.x,q.y,bw*.46,6*s,0,0,7);hg.fillStyle='rgba(0,0,0,.38)';hg.fill();
+      hg.beginPath();hg.arc(q.x,q.y,(4+pulse*10)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.4*(1-pulse)})`;hg.fill();
+      hg.save();hg.translate(q.x,q.y);hg.scale(bikeFace,1);
+      hg.shadowColor='rgba(255,255,255,.85)';hg.shadowBlur=5*s;
+      hg.drawImage(BIKE,-bw/2,-bh*(148/152),bw,bh);hg.shadowBlur=0;hg.drawImage(BIKE,-bw/2,-bh*(148/152),bw,bh);hg.restore();
+      hg.beginPath();hg.arc(q.x,q.y,3*s,0,7);hg.fillStyle=col;hg.fill();hg.strokeStyle='#fff';hg.lineWidth=1.2*s;hg.stroke();
+    }else{
     hg.beginPath();hg.arc(q.x,q.y,(9+pulse*16)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.35*(1-pulse)})`;hg.fill();
     hg.beginPath();hg.arc(q.x,q.y,8*s,0,7);hg.fillStyle='#fff';hg.fill();
     hg.beginPath();hg.arc(q.x,q.y,5.5*s,0,7);hg.fillStyle=col;hg.fill();
+    }
   }
   // title block
   hg.textAlign='left';hg.textBaseline='alphabetic';hg.fillStyle='#fff';
@@ -775,6 +833,7 @@ document.getElementById('dur').onchange=e=>{const u=state.T/total();applyDur(e.t
 function setMode(m){state.mode=m;document.getElementById('m-seam').setAttribute('aria-pressed',m==='seam');document.getElementById('m-split').setAttribute('aria-pressed',m==='split');refreshRoute();seek(Math.min(state.T,total()))}
 document.getElementById('m-seam').onclick=()=>setMode('seam');
 document.getElementById('m-split').onclick=()=>setMode('split');
+document.getElementById('marker').onchange=e=>{state.marker=e.target.value;drawHud()};
 const hudEl=document.getElementById('hudmode');hudEl.onchange=()=>{state.hud=hudEl.value;state.gearShow=null;drawHud()};
 const cmodeEl=document.getElementById('cmode'),ccolorEl=document.getElementById('ccolor');
 cmodeEl.onchange=()=>{state.cmode=cmodeEl.value;ccolorEl.hidden=state.cmode!=='solid';applyLineColor()};
