@@ -22,7 +22,7 @@
 html,body{height:100%}
 [hidden]{display:none!important}
 body{background:var(--ink);color:var(--text);font-family:var(--f-body);overflow:hidden}
-#app{height:100%;display:grid;grid-template-rows:1fr auto}
+#app{height:100%;display:grid;grid-template-rows:1fr auto;grid-template-columns:minmax(0,1fr)}
 #stage{position:relative;min-height:0;display:grid;place-items:center;overflow:hidden;background:#05070a}
 #frame{position:relative;width:100%;height:100%;overflow:hidden}
 #map,#hud{position:absolute;inset:0}
@@ -37,7 +37,7 @@ body{background:var(--ink);color:var(--text);font-family:var(--f-body);overflow:
   padding-block:10px calc(10px + env(safe-area-inset-bottom,0px));
   padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
   display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
-.grp{display:flex;align-items:center;gap:8px;min-width:0}
+.grp{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
 .grow{flex:1 1 260px}
 button,select,input[type=text]{font:inherit;font-size:13px;color:var(--text);background:#1f2731;border:1px solid var(--line);border-radius:6px;height:34px;padding:0 12px}
 button{cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
@@ -100,6 +100,10 @@ label.sm{font-size:12px;color:var(--muted)}
       <input type="color" id="ccolor" value="#ffb547" aria-label="路線顏色">
     </div>
     <div class="grp">
+      <label class="sm" for="hudmode">面板</label>
+      <select id="hudmode"><option value="std">標準</option><option value="cockpit">座艙・變速</option></select>
+    </div>
+    <div class="grp">
       <label class="sm hide-sm" for="title">標題</label>
       <input type="text" id="title" value="晨騎・內湖山區" maxlength="24">
     </div>
@@ -123,7 +127,7 @@ function parseFIT(buf){
   const dv=new DataView(buf);const hs=dv.getUint8(0);const dataSize=dv.getUint32(4,true);
   const sig=String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
   if(sig!=='.FIT')throw new Error('不是有效的 FIT 檔');
-  let p=hs;const end=Math.min(hs+dataSize,buf.byteLength);const defs={};let lastTs=0;const out=[];
+  let p=hs;const end=Math.min(hs+dataSize,buf.byteLength);const defs={};let lastTs=0;const out=[];const gears=[];
   const S=180/2147483648, EPOCH=631065600;
   function rd(off,size,bt,le){
     const t=bt&0x1F;
@@ -154,10 +158,15 @@ function parseFIT(buf){
         const spd=f[73]!=null?f[73]/1000:(f[6]!=null?f[6]/1000:null);
         out.push([ts+EPOCH,f[0]*S,f[1]*S,alt,f[5]!=null?f[5]/100:null,spd!=null?spd*3.6:null,f[3]||0,f[4]||0,f[7]||0,f[13]==null?null:f[13]]);
       }
+    } else if(d.g===21){ // event: Di2 / eTap gear changes
+      const f={};let o=p;for(const [num,size,bt] of d.fields){f[num]=rd(o,size,bt,d.le);o+=size}
+      let ts=f[253];if(ts!=null)lastTs=ts;else if(tsOff!=null){ts=(lastTs&~0x1F)+tsOff;if(tsOff<(lastTs&0x1F))ts+=0x20;lastTs=ts}
+      const ev=f[0],g=f[3];
+      if((ev===42||ev===43||ev===44)&&g!=null&&ts)gears.push([ts+EPOCH,(g>>>16)&255,(g>>>24)&255,g&255,(g>>>8)&255]);
     } else if(tsOff!=null){lastTs=(lastTs&~0x1F)+tsOff}
     p+=d.len;
   }
-  return out;
+  out.gears=gears;return out;
 }
 
 
@@ -184,6 +193,8 @@ function cleanSegment(rows){
 let RIDE=null;
 function buildRide(segs){
   segs=segs.filter(s=>s.length>1).sort((a,b)=>a[0][0]-b[0][0]);
+  const GE=[];segs.forEach(r=>(r.gears||[]).forEach(g=>GE.push(g)));GE.sort((a,b)=>a[0]-b[0]);
+  const rearT={},frontT={};GE.forEach(g=>{frontT[g[1]]=g[2];rearT[g[3]]=g[4]});
   const P=[];let a=0,dOff=0;const segInfo=[];
   segs.forEach((rows,si)=>{
     const start=P.length;
@@ -213,7 +224,7 @@ function buildRide(segs){
   const pct=(arr,q)=>{const s=[...arr].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor(q*s.length))]};
   const rng={speed:[pct(P.map(p=>p.cv),.05),pct(P.map(p=>p.cv),.95)],power:[pct(P.map(p=>p.cp),.05),pct(P.map(p=>p.cp),.95)]};
   return {P,segs:segInfo,A:P[P.length-1].a,dist:P[P.length-1].d,up,maxAlt,altMin,maxV,avgHr:hrN?hrS/hrN:0,moving,
-    bounds:[[minLng,minLat],[maxLng,maxLat]],hasHr:hrN>0,hasPw:P.some(p=>p.pw>0),hasCad:P.some(p=>p.cad>0),rng};
+    bounds:[[minLng,minLat],[maxLng,maxLat]],hasHr:hrN>0,hasPw:P.some(p=>p.pw>0),hasCad:P.some(p=>p.cad>0),rng,gears:GE,hasGears:GE.length>0,rearT,frontT,nRear:Math.max(0,...Object.keys(rearT).map(Number))};
 }
 function sampleAt(a){
   const P=RIDE.P;let lo=0,hi=P.length-1;
@@ -226,7 +237,7 @@ function sampleAt(a){
 
 /* ---------------- timeline ---------------- */
 const INTRO=4.5,OUTRO=6,PAUSE=2.6;
-const state={cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
+const state={hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
 function pauses(){return state.mode==='split'?RIDE.segs.slice(0,-1).map(s=>s.a1):[]}
 function total(){return INTRO+state.dur+pauses().length*PAUSE+OUTRO}
 // map timeline T -> {phase, a, pauseIdx}
@@ -420,6 +431,8 @@ function drawHud(){
   // profile
   const pw=W-pad*2,phh=Math.max(46,H*.12),py=H-pad-phh;
   drawProfile(pad,py,pw,phh,s,fb);
+  if(state.hud==='cockpit'&&RIDE.hasGears){drawCockpit(s,fb,pad,py);}
+  else{
   // stats row
   const stats=[['時速',cur.v.toFixed(1),'km/h'],['距離',cur.d.toFixed(2),'km'],['海拔',Math.round(cur.alt),'m']];
   if(RIDE.hasHr)stats.push(['心率',cur.hr||'—','bpm']);
@@ -434,10 +447,94 @@ function drawHud(){
     const vs=String(st[1]);hg.fillText(vs,x,sy-6*s);const vw=hg.measureText(vs).width;
     hg.font=`500 ${13*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.7)';hg.fillText(st[2],x+vw+4*s,sy-6*s);
   });
+  }
   // tiny credit (kept in recordings)
   hg.textAlign='right';hg.font=`400 ${9*s}px ${fb}`;hg.fillStyle='rgba(255,255,255,.45)';
   hg.fillText('Imagery © Esri, Maxar, Earthstar Geographics · Terrain © Mapzen / AWS',W-pad,H-6*s);
   if(ph.phase==='outro')drawSummary(s,fb,ph.u);
+}
+
+/* ---------------- cockpit HUD: Di2 gear position + speed / cadence / 3s power ---------------- */
+function gearIdx(t){const G=RIDE.gears;let lo=0,hi=G.length-1;if(t<G[0][0])return 0;while(lo<hi){const m=(lo+hi+1)>>1;if(G[m][0]<=t)lo=m;else hi=m-1}return lo}
+// the gear held longest inside a short window, so time-compressed playback doesn't flicker
+function gearAt(t){
+  const G=RIDE.gears,w=Math.max(0,RIDE.A/state.dur*.3);
+  if(w<3)return G[gearIdx(t)];
+  const a=t-w/2,b=t+w/2;let i=gearIdx(a);const acc={};let best=null,bv=-1;
+  for(;i<G.length&&G[i][0]<b;i++){const s0=Math.max(a,G[i][0]),s1=Math.min(b,i+1<G.length?G[i+1][0]:b);
+    const k=G[i][1]*100+G[i][3];acc[k]=(acc[k]||0)+Math.max(0,s1-s0);if(acc[k]>bv){bv=acc[k];best=G[i]}}
+  return best||G[gearIdx(t)];
+}
+const AMBER='#ff9f2e';
+function segBar(x,y,w,h,n,v,col){const gap=2,sw=(w-gap*(n-1))/n,on=Math.round(Math.max(0,Math.min(1,v))*n);
+  for(let i=0;i<n;i++){hg.fillStyle=i<on?col:'rgba(255,255,255,.12)';hg.fillRect(x+i*(sw+gap),y,sw,h)}}
+function readout(x,y,label,val,unit,size,col,bar,s,fb,bw){
+  hg.textAlign='left';hg.font=`500 ${11.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.66)';hg.fillText(label,x,y-size*s-8*s);
+  hg.font=`600 ${size*s}px ${FN}`;hg.fillStyle=col;const vs=String(val);hg.fillText(vs,x,y);const vw=hg.measureText(vs).width;
+  hg.font=`500 ${14*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.7)';hg.fillText(unit,x+vw+4*s,y);
+  if(bar!=null)segBar(x,y+8*s,bw,5*s,16,bar,col===('#fff')?'rgba(255,255,255,.85)':col);
+}
+function drawCockpit(s,fb,pad,py){
+  const t=ph.phase==='intro'?RIDE.P[0].t:cur.t,G=gearAt(t),now=hudClock??performance.now();
+  const key=G[1]*100+G[3];
+  if(!state.gearShow||state.gearShow.key!==key){const prev=state.gearShow;
+    state.gearShow={key,at:prev?now:-1e9,dir:prev?Math.sign((G[1]*100+G[3])-prev.key):0}}
+  const flash=Math.max(0,1-(now-state.gearShow.at)/450);
+  // panel geometry (right side)
+  const pw=Math.max(150*s,Math.min(W*.3,280*s)),top=pad+62*s,bot=py-18*s,x0=W-pw;
+  hg.save();
+  hg.beginPath();hg.moveTo(W,top-8*s);hg.lineTo(x0+pw*.42,top-8*s);
+  hg.quadraticCurveTo(x0-pw*.08,(top+bot)/2,x0+pw*.42,bot+8*s);hg.lineTo(W,bot+8*s);hg.closePath();
+  hg.fillStyle='rgba(7,10,22,.74)';hg.fill();hg.strokeStyle='rgba(255,255,255,.14)';hg.lineWidth=1;hg.stroke();
+  // chainring lights
+  const fr=Object.keys(RIDE.frontT).map(Number).sort((a,b)=>b-a);
+  const cw=Math.min(64*s,(pw*.62)/Math.max(1,fr.length)),cy0=top+4*s;
+  hg.font=`500 ${10.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.6)';hg.textAlign='right';hg.fillText('前盤',W-pad,cy0+9*s);
+  fr.forEach((n,i)=>{const x=W-pad-cw*(fr.length-i)-6*s-28*s,on=n===G[1];
+    rr(x,cy0,cw-6*s,24*s,5*s);hg.fillStyle=on?AMBER:'rgba(255,255,255,.07)';hg.fill();
+    hg.strokeStyle=on?AMBER:'rgba(255,255,255,.25)';hg.lineWidth=1.2*s;hg.stroke();
+    hg.textAlign='center';hg.font=`700 ${16*s}px ${FN}`;hg.fillStyle=on?'#1a1003':'rgba(232,237,242,.55)';
+    hg.fillText(RIDE.frontT[n],x+(cw-6*s)/2,cy0+17.5*s)});
+  // rear cassette: numbered dials on an arc, each wired to a bar
+  const N=RIDE.nRear,y1=top+44*s,y2=bot-58*s,rowh=(y2-y1)/N,barW=pw*.22,barX=W-pad-barW,xr=barX-10*s,A=pw*.42;
+  const cr=Math.max(6*s,Math.min(rowh*.4,14*s));
+  hg.font=`500 ${10.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.6)';hg.textAlign='right';hg.fillText('後變',W-pad,y1-6*s);
+  for(let i=1;i<=N;i++){
+    const yc=y2-(i-.5)*rowh,u=(i-.5)/N,th=(u-.5)*1.9,cx=xr-A*Math.cos(th)+A*.25,on=i===G[3],near=Math.abs(i-G[3])===1;
+    hg.strokeStyle=on?AMBER:'rgba(160,175,205,.32)';hg.lineWidth=(on?1.8:1)*s;
+    hg.beginPath();hg.moveTo(cx+cr,yc);hg.lineTo(xr,yc);hg.lineTo(barX,yc);hg.stroke();
+    // bar
+    hg.fillStyle=on?AMBER:near?'rgba(255,159,46,.16)':'rgba(255,255,255,.07)';
+    hg.fillRect(barX,yc-rowh*.32,barW,rowh*.64);
+    // dial
+    if(on&&flash>0){hg.beginPath();hg.arc(cx,yc,cr+10*s*flash,0,7);hg.fillStyle=`rgba(255,159,46,${.45*flash})`;hg.fill()}
+    hg.beginPath();hg.arc(cx,yc,cr,0,7);hg.fillStyle=on?AMBER:'rgba(10,14,28,.9)';hg.fill();
+    hg.strokeStyle=on?'#ffd39a':'rgba(160,175,205,.45)';hg.lineWidth=1.4*s;hg.stroke();
+    hg.textAlign='center';hg.textBaseline='middle';hg.font=`700 ${cr*1.15}px ${FN}`;
+    hg.fillStyle=on?'#1a1003':'rgba(200,210,230,.6)';hg.fillText(i,cx,yc+.5*s);hg.textBaseline='alphabetic';
+    if(on){hg.textAlign='right';hg.font=`600 ${11*s}px ${FN}`;hg.fillStyle='#1a1003';hg.fillText(RIDE.rearT[i]+'T',barX+barW-4*s,yc+4*s)}
+  }
+  // gear ratio
+  hg.textAlign='right';hg.font=`700 ${34*s}px ${FN}`;hg.fillStyle='#fff';
+  const ratio=`${G[2]}×${G[4]}`;hg.fillText(ratio,W-pad,bot-16*s);
+  hg.font=`500 ${11*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.66)';
+  const arrow=flash>0&&state.gearShow.dir?(state.gearShow.dir>0?'  ▲ 升檔':'  ▼ 降檔'):'';
+  hg.fillText(`齒比 ${(G[2]/G[4]).toFixed(2)}${arrow}`,W-pad,bot-2*s);
+  hg.restore();
+  // big readouts (left of the panel)
+  const avail=x0-pad*2,v=cur.v,cad=cur.cad||0,p3=Math.round(cur.p3||0),pmax=Math.max(300,(RIDE.rng.power[1]||250)*1.3);
+  const by=py-30*s;
+  if(avail>=360*s){
+    const bw=Math.min(150*s,avail/3-18*s);
+    readout(pad,by,'速度',v.toFixed(1),'km/h',58,AMBER,v/60,s,fb,bw);
+    readout(pad+avail*.4,by,'踏頻',cad,'rpm',44,'#fff',cad/120,s,fb,bw);
+    if(RIDE.hasPw)readout(pad+avail*.7,by,'3 秒功率',p3,'W',44,'#fff',p3/pmax,s,fb,bw);
+  }else{
+    const bw=Math.min(120*s,avail/2-12*s);
+    readout(pad,by-78*s,'速度',v.toFixed(1),'km/h',54,AMBER,v/60,s,fb,Math.min(avail,200*s));
+    readout(pad,by,'踏頻',cad,'rpm',36,'#fff',cad/120,s,fb,bw);
+    if(RIDE.hasPw)readout(pad+avail/2,by,'3 秒功率',p3,'W',36,'#fff',p3/pmax,s,fb,bw);
+  }
 }
 function drawProfile(x,y,w,h,s,fb){
   const P=RIDE.P,D=RIDE.dist,lo=RIDE.altMin,hi=RIDE.maxAlt,span=Math.max(50,hi-lo);
@@ -647,10 +744,12 @@ document.getElementById('dur').onchange=e=>{const u=state.T/total();state.dur=+e
 function setMode(m){state.mode=m;document.getElementById('m-seam').setAttribute('aria-pressed',m==='seam');document.getElementById('m-split').setAttribute('aria-pressed',m==='split');refreshRoute();seek(Math.min(state.T,total()))}
 document.getElementById('m-seam').onclick=()=>setMode('seam');
 document.getElementById('m-split').onclick=()=>setMode('split');
+const hudEl=document.getElementById('hudmode');hudEl.onchange=()=>{state.hud=hudEl.value;state.gearShow=null;drawHud()};
 const cmodeEl=document.getElementById('cmode'),ccolorEl=document.getElementById('ccolor');
 cmodeEl.onchange=()=>{state.cmode=cmodeEl.value;ccolorEl.hidden=state.cmode!=='solid';applyLineColor()};
 ccolorEl.oninput=()=>{state.color=ccolorEl.value;applyLineColor()};
 function syncColorUI(){const o=cmodeEl.querySelector('option[value=power]');o.disabled=!RIDE.hasPw;
+  hudEl.querySelector('option[value=cockpit]').disabled=!RIDE.hasGears;if(!RIDE.hasGears&&state.hud==='cockpit'){hudEl.value=state.hud='std'}state.gearShow=null;
   if(!RIDE.hasPw&&state.cmode==='power'){cmodeEl.value=state.cmode='solid';ccolorEl.hidden=false}applyLineColor()}
 const titleEl=document.getElementById('title');state.title=titleEl.value;titleEl.oninput=()=>{state.title=titleEl.value;map.triggerRepaint()};
 document.getElementById('rec').onclick=()=>{if(state.rec)stopRec();else startRec()};
@@ -683,7 +782,7 @@ function setRide(r){RIDE=r;setPlaying(false);refreshRoute();syncColorUI();comput
 /* ---------------- boot ---------------- */
 (async()=>{
   sizeHud();requestAnimationFrame(frame);
-  const segs=(await (await fetch('rides.json')).json()).map(cleanSegment);
+  const segs=(await (await fetch('rides.json')).json()).map(o=>cleanSegment(Array.isArray(o)?o:Object.assign(o.rows,{gears:o.gears})));
   await new Promise(r=>map.loaded()?r():map.on('load',r));
   RIDE=buildRide(segs);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
   document.getElementById('loadmsg').textContent='準備完成';
