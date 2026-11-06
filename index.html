@@ -56,6 +56,7 @@ input[type=range]{flex:1;min-width:80px;accent-color:var(--amber)}
 .seg button[aria-pressed=true]{background:#2b3542;color:var(--text)}
 label.sm{font-size:12px;color:var(--muted)}
 #title{width:150px}
+#durhint{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:84px}
 #ccolor{width:38px;height:34px;padding:2px;border:1px solid var(--line);border-radius:6px;background:#1f2731;cursor:pointer}
 #toast{position:absolute;left:50%;top:calc(14px + env(safe-area-inset-top,0px));transform:translateX(-50%);background:rgba(13,17,23,.92);border:1px solid var(--line);padding:8px 14px;border-radius:8px;font-size:13px;z-index:6;max-width:min(90%,520px);text-align:center}
 #drop{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:rgba(13,17,23,.82);border:2px dashed var(--amber);font-size:18px}
@@ -90,7 +91,11 @@ label.sm{font-size:12px;color:var(--muted)}
     </div>
     <div class="grp">
       <label class="sm" for="dur">長度</label>
-      <select id="dur"><option value="30">30 秒</option><option value="45">45 秒</option><option value="60" selected>60 秒</option><option value="90">90 秒</option><option value="120">2 分鐘</option></select>
+      <select id="dur">
+        <optgroup label="固定長度"><option value="30">30 秒</option><option value="45">45 秒</option><option value="60" selected>60 秒</option><option value="90">90 秒</option><option value="120">2 分鐘</option></optgroup>
+        <optgroup label="播放倍速"><option value="x1">1×（實際速度）</option><option value="x2">2×</option><option value="x5">5×</option><option value="x10">10×</option><option value="x20">20×</option><option value="x50">50×</option><option value="x100">100×</option></optgroup>
+      </select>
+      <span class="sm" id="durhint"></span>
       <label class="sm" for="aspect">比例</label>
       <select id="aspect"><option value="fill">填滿</option><option value="16:9">16:9</option><option value="9:16">9:16 直式</option><option value="1:1">1:1</option></select>
     </div>
@@ -237,7 +242,7 @@ function sampleAt(a){
 
 /* ---------------- timeline ---------------- */
 const INTRO=4.5,OUTRO=6,PAUSE=2.6;
-const state={hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
+const state={speedX:0,hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
 function pauses(){return state.mode==='split'?RIDE.segs.slice(0,-1).map(s=>s.a1):[]}
 function total(){return INTRO+state.dur+pauses().length*PAUSE+OUTRO}
 // map timeline T -> {phase, a, pauseIdx}
@@ -427,6 +432,7 @@ function drawHud(){
   hg.font=`500 ${12*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.7)';
   let tag='';if(state.mode==='split'&&RIDE.segs.length>1)tag=`第 ${cur.seg+1} 段`;
   if(ph.phase==='pause')tag=`休息中 ${fmtT(RIDE.segs[ph.pi+1].t0-RIDE.segs[ph.pi].t1)}`;
+  if(state.speedX&&!tag)tag=`${state.speedX}× 播放`;
   if(tag)hg.fillText(tag,W-pad,pad+46*s);
   // profile
   const pw=W-pad*2,phh=Math.max(46,H*.12),py=H-pad-phh;
@@ -667,7 +673,7 @@ async function saveLive(rec){
     try{blob=new Blob([await remuxMp4(await blob.arrayBuffer())],{type:'video/mp4'})}catch(e){console.warn('remux failed',e)}
     setRecUI(false,'錄成影片');
   }
-  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.${isMp4?'mp4':'webm'}`;
+  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.speedX?state.speedX+'x':state.dur+'s'}.${isMp4?'mp4':'webm'}`;
   if(!isMp4)toast('這個瀏覽器只能錄成 webm，IG 可能無法上傳；建議改用 Chrome 或 Edge。');
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
@@ -722,7 +728,7 @@ async function finishRec(){
   if(rec.cancel){toast('已取消錄影');return}
   rec.muxer.finalize();
   const blob=new Blob([rec.target.buffer],{type:'video/mp4'});
-  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.dur}s.mp4`;
+  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.speedX?state.speedX+'x':state.dur+'s'}.mp4`;
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
 function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.live){setPlaying(false);if(r.mr&&r.mr.state!=='inactive')r.mr.stop();else{state.rec=null;setRecUI(false,'錄成影片')}}}
@@ -740,7 +746,13 @@ function zoneSeek(e){const r=sz.getBoundingClientRect();const pad=20*Math.max(.6
 sz.addEventListener('pointerdown',e=>{if(state.rec||!RIDE)return;dragging=true;sz.setPointerCapture(e.pointerId);zoneSeek(e)});
 sz.addEventListener('pointermove',e=>{if(dragging)zoneSeek(e)});
 sz.addEventListener('pointerup',()=>dragging=false);
-document.getElementById('dur').onchange=e=>{const u=state.T/total();state.dur=+e.target.value;seek(u*total())};
+function applyDur(v){
+  if(String(v).startsWith('x')){state.speedX=+String(v).slice(1);state.dur=RIDE?RIDE.A/state.speedX:60}
+  else{state.speedX=0;state.dur=+v}
+  updateDurHint();
+}
+function updateDurHint(){const el=document.getElementById('durhint');if(!el||!RIDE)return;el.textContent=state.speedX?`影片約 ${fmtT(total())}`:`約 ${Math.round(RIDE.A/state.dur)}× 倍速`}
+document.getElementById('dur').onchange=e=>{const u=state.T/total();applyDur(e.target.value);seek(u*total())};
 function setMode(m){state.mode=m;document.getElementById('m-seam').setAttribute('aria-pressed',m==='seam');document.getElementById('m-split').setAttribute('aria-pressed',m==='split');refreshRoute();seek(Math.min(state.T,total()))}
 document.getElementById('m-seam').onclick=()=>setMode('seam');
 document.getElementById('m-split').onclick=()=>setMode('split');
@@ -776,7 +788,7 @@ async function loadFiles(files){
     toast(`已載入 ${segs.length} 段紀錄`);
   }catch(err){toast('讀取失敗：'+(err.message||'檔案格式不支援'))}
 }
-function setRide(r){RIDE=r;setPlaying(false);refreshRoute();syncColorUI();computeOverview();state.T=0;update(0,true);syncUI();
+function setRide(r){RIDE=r;applyDur(document.getElementById('dur').value);setPlaying(false);refreshRoute();syncColorUI();computeOverview();state.T=0;update(0,true);syncUI();
   document.getElementById('m-split').parentElement.style.opacity=RIDE.segs.length>1?1:.4}
 
 /* ---------------- boot ---------------- */
@@ -784,7 +796,7 @@ function setRide(r){RIDE=r;setPlaying(false);refreshRoute();syncColorUI();comput
   sizeHud();requestAnimationFrame(frame);
   const segs=(await (await fetch('rides.json')).json()).map(o=>cleanSegment(Array.isArray(o)?o:Object.assign(o.rows,{gears:o.gears})));
   await new Promise(r=>map.loaded()?r():map.on('load',r));
-  RIDE=buildRide(segs);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
+  RIDE=buildRide(segs);applyDur(document.getElementById('dur').value);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
   document.getElementById('loadmsg').textContent='準備完成';
   const done=()=>{if(done.x)return;done.x=1;document.getElementById('loading').classList.add('gone');setTimeout(()=>{if(!state.T)setPlaying(true)},500)};
   map.once('idle',done);setTimeout(done,12000);
