@@ -295,41 +295,69 @@ function normVal(p){
   const r=RIDE.rng[state.cmode],v=state.cmode==='speed'?p.cv:p.cp;
   return Math.max(0,Math.min(1,(v-r[0])/((r[1]-r[0])||1)));
 }
-function doneFC(cur){
-  const fs=[],P=RIDE.P,grad=state.cmode!=='solid',CH=6;
-  RIDE.segs.forEach((s,i)=>{
-    if(cur.k<s.i0)return;
-    const end=Math.min(cur.k,s.i1),live=cur.k>=s.i0&&cur.k<=s.i1,sg=state.mode==='split'?i:0;
-    if(!grad){
-      const c=P.slice(s.i0,end+1).map(p=>[p.lng,p.lat]);if(live)c.push([cur.lng,cur.lat]);
-      if(c.length>1)fs.push(lineFeature(c,sg));return;
-    }
-    for(let j=s.i0;j<=end;j+=CH){
-      const j2=Math.min(j+CH,end);const c=[];let n=0,m=0;
-      for(let k=j;k<=j2;k++){c.push([P[k].lng,P[k].lat]);n+=normVal(P[k]);m++}
-      if(j2===end&&live)c.push([cur.lng,cur.lat]);
-      if(c.length>1){const f=lineFeature(c,sg);f.properties.n=n/m;fs.push(f)}
-    }
-  });
-  return{type:'FeatureCollection',features:fs};
-}
 const RAMP=[[0,'#3b6fd8'],[.25,'#2fbf9a'],[.5,'#e8e04a'],[.75,'#ff9a3c'],[1,'#ff3d55']];
 function rampColor(n){for(let i=1;i<RAMP.length;i++){if(n<=RAMP[i][0]){const [a,ca]=RAMP[i-1],[b,cb]=RAMP[i];const u=(n-a)/(b-a);
   const h=c=>[1,3,5].map(o=>parseInt(c.slice(o,o+2),16));const x=h(ca),y=h(cb);return`rgb(${x.map((v,k)=>Math.round(v+(y[k]-v)*u)).join(',')})`}}return RAMP[RAMP.length-1][1]}
-function lineColor(){
-  if(state.cmode!=='solid')return['interpolate',['linear'],['get','n'],...RAMP.flat()];
-  return['match',['get','seg'],1,'#57d3e6',2,'#c59bff',state.color];
+// Ridden part: one static line per segment (lineMetrics) revealed with a line-gradient,
+// so playback only changes a paint property and never re-tiles geometry
+const CLEAR='rgba(0,0,0,0)';let progLast=[],gradStops=[];
+function segFrac(s){ // cumulative 0..1 length fraction for each point of a segment
+  const P=RIDE.P,f=[0];let L=0;for(let k=s.i0+1;k<=s.i1;k++){L+=hav(P[k-1].lat,P[k-1].lng,P[k].lat,P[k].lng);f.push(L)}
+  return f.map(x=>L?x/L:0);
 }
-function riderColor(){if(state.cmode!=='solid')return rampColor(normVal(cur));return state.mode==='split'&&cur.seg===1?'#57d3e6':state.color}
-function applyLineColor(){if(!map.getLayer('done'))return;const e=lineColor();map.setPaintProperty('done','line-color',e);map.setPaintProperty('done-glow','line-color',e);seek(state.T)}
+function segBaseColor(i){return state.mode==='split'?(['#ffb547','#57d3e6','#c59bff'][i]||state.color):state.color}
+function buildGradStops(){ // per segment: [[progress,color],...] for the whole line
+  gradStops=RIDE.segs.map((s,i)=>{
+    if(state.cmode==='solid')return [[0,state.mode==='split'?segBaseColor(i):state.color]];
+    const n=s.i1-s.i0+1,step=Math.max(1,Math.ceil(n/220)),out=[];
+    for(let j=0;j<n;j+=step){let v=0,m=0;for(let k=j;k<Math.min(n,j+step);k++){v+=normVal(RIDE.P[s.i0+k]);m++}out.push([s.frac[j],rampColor(v/m)])}
+    return out;
+  });
+  progLast=[];
+}
+function gradExpr(i,f){
+  const st=gradStops[i];
+  if(f>=1){if(st.length===1)return['interpolate',['linear'],['line-progress'],0,st[0][1],1,st[0][1]];
+    const e=['interpolate',['linear'],['line-progress']];let last=-1;for(const [p,c] of st){if(p>last){e.push(p,c);last=p}}if(last<1)e.push(1,st[st.length-1][1]);return e}
+  if(st.length===1)return['step',['line-progress'],st[0][1],f,CLEAR];
+  const e=['interpolate',['linear'],['line-progress']];let last=-1,lc=st[0][1];
+  for(const [p,c] of st){if(p>=f)break;if(p>last){e.push(p,c);last=p;lc=c}}
+  const f1=Math.max(f,last+1e-6);e.push(f1,lc);
+  if(f1+1e-5<1)e.push(f1+1e-5,CLEAR,1,CLEAR);
+  if(e.length<7)e.push(1,lc);
+  return e;
+}
+function setProgress(cur,hideAll){
+  RIDE.segs.forEach((s,i)=>{
+    let f;
+    if(hideAll||cur.k<s.i0)f=0;else if(cur.k>=s.i1)f=1;
+    else{const k=cur.k-s.i0,a=s.frac[k],b=s.frac[Math.min(k+1,s.frac.length-1)];f=a+(b-a)*(cur.f||0)}
+    if(progLast[i]!=null&&Math.abs(progLast[i]-f)<2e-5)return;progLast[i]=f;
+    const vis=f>0?'visible':'none';
+    for(const id of ['done-glow'+i,'done'+i]){if(!map.getLayer(id))continue;
+      if(map.getLayoutProperty(id,'visibility')!==vis)map.setLayoutProperty(id,'visibility',vis);
+      if(f>0)map.setPaintProperty(id,'line-gradient',gradExpr(i,f))}
+  });
+}
+function riderColor(){if(state.cmode!=='solid')return rampColor(normVal(cur));return state.mode==='split'?segBaseColor(cur.seg):state.color}
+function applyLineColor(){if(!map.getLayer('route-base'))return;buildGradStops();seek(state.T)}
+function removeSegLayers(){for(let i=0;map.getSource('seg'+i);i++){for(const id of ['done-glow'+i,'done'+i])if(map.getLayer(id))map.removeLayer(id);map.removeSource('seg'+i)}}
+function addSegLayers(){
+  removeSegLayers();
+  RIDE.segs.forEach((s,i)=>{
+    s.frac=segFrac(s);
+    map.addSource('seg'+i,{type:'geojson',lineMetrics:true,data:lineFeature(RIDE.P.slice(s.i0,s.i1+1).map(p=>[p.lng,p.lat]),i)});
+    map.addLayer({id:'done-glow'+i,type:'line',source:'seg'+i,layout:{'line-join':'round','line-cap':'round',visibility:'none'},paint:{'line-gradient':['interpolate',['linear'],['line-progress'],0,CLEAR,1,CLEAR],'line-width':14,'line-blur':10,'line-opacity':.55}});
+    map.addLayer({id:'done'+i,type:'line',source:'seg'+i,layout:{'line-join':'round','line-cap':'round',visibility:'none'},paint:{'line-gradient':['interpolate',['linear'],['line-progress'],0,CLEAR,1,CLEAR],'line-width':4.5}});
+  });
+  buildGradStops();
+}
 function addRouteLayers(){
   map.addSource('route',{type:'geojson',data:routeFC()});
-  map.addSource('done',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
   map.addLayer({id:'route-base',type:'line',source:'route',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':'#ffffff','line-opacity':.38,'line-width':3}});
-  map.addLayer({id:'done-glow',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':lineColor(),'line-width':14,'line-blur':10,'line-opacity':.55}});
-  map.addLayer({id:'done',type:'line',source:'done',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':lineColor(),'line-width':4.5}});
+  addSegLayers();
 }
-function refreshRoute(){if(map.getSource('route'))map.getSource('route').setData(routeFC())}
+function refreshRoute(){if(map.getSource('route')){map.getSource('route').setData(routeFC());addSegLayers()}}
 
 /* ---------------- camera ---------------- */
 let overview=null;
@@ -370,7 +398,7 @@ function update(dt,snap){
     cam=lerpCam(st,ov,ease(Math.min(1,ph.u*1.4)));
   }else cam={...rideCam(cur,state.bearing),padTop:.32};
   applyCam(cam);
-  map.getSource('done').setData(doneFC(ph.phase==='intro'?{...cur,k:-1}:cur));
+  setProgress(cur,ph.phase==='intro');
 }
 
 /* ---------------- HUD (drawn on canvas so recordings include it) ---------------- */
