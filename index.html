@@ -456,13 +456,15 @@ function drawHud(){
       if(!BIKE)BIKE=makeBikeSprite();
       const ah=sampleAt(Math.min(RIDE.A,ph.a+Math.max(20,RIDE.A/state.dur*.4))),qa=map.project([ah.lng,ah.lat]);
       if(Math.abs(qa.x-q.x)>2*s)bikeFace=qa.x>=q.x?1:-1;
-      const bw=74*s,bh=bw*152/240;
-      hg.beginPath();hg.ellipse(q.x,q.y,bw*.46,6*s,0,0,7);hg.fillStyle='rgba(0,0,0,.38)';hg.fill();
-      hg.beginPath();hg.arc(q.x,q.y,(4+pulse*10)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.4*(1-pulse)})`;hg.fill();
+      // round badge (about the size of the old dot) holding the bike, with a breathing pulse
+      const R0=15*s,bw=27*s,bh=bw*152/240;
+      for(const off of [0,.5]){const u=(pulse+off)%1;
+        hg.beginPath();hg.arc(q.x,q.y,R0+u*22*s,0,7);hg.strokeStyle=col;hg.globalAlpha=.75*(1-u);hg.lineWidth=(2.5-1.5*u)*s;hg.stroke();hg.globalAlpha=1}
+      const br=1+.06*Math.sin(pulse*Math.PI*2);
+      hg.beginPath();hg.arc(q.x,q.y,R0*br+3*s,0,7);hg.fillStyle=col;hg.globalAlpha=.35;hg.fill();hg.globalAlpha=1;
+      hg.beginPath();hg.arc(q.x,q.y,R0*br,0,7);hg.fillStyle='rgba(246,248,250,.96)';hg.fill();hg.strokeStyle=col;hg.lineWidth=2.2*s;hg.stroke();
       hg.save();hg.translate(q.x,q.y);hg.scale(bikeFace,1);
-      hg.shadowColor='rgba(255,255,255,.85)';hg.shadowBlur=5*s;
-      hg.drawImage(BIKE,-bw/2,-bh*(148/152),bw,bh);hg.shadowBlur=0;hg.drawImage(BIKE,-bw/2,-bh*(148/152),bw,bh);hg.restore();
-      hg.beginPath();hg.arc(q.x,q.y,3*s,0,7);hg.fillStyle=col;hg.fill();hg.strokeStyle='#fff';hg.lineWidth=1.2*s;hg.stroke();
+      hg.drawImage(BIKE,-bw/2,-bh/2-1*s,bw,bh);hg.restore();
     }else{
     hg.beginPath();hg.arc(q.x,q.y,(9+pulse*16)*s,0,7);hg.fillStyle=`rgba(255,255,255,${.35*(1-pulse)})`;hg.fill();
     hg.beginPath();hg.arc(q.x,q.y,8*s,0,7);hg.fillStyle='#fff';hg.fill();
