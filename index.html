@@ -178,6 +178,36 @@ function parseFIT(buf){
 
 
 
+/* ---------------- terrain clean-up: remove spike / pit artefacts in Terrarium DEM tiles ---------------- */
+async function cleanDem(buf,z){
+  try{
+    const bmp=await createImageBitmap(new Blob([buf],{type:'image/png'}),{colorSpaceConversion:'none',premultiplyAlpha:'none'});
+    const n=bmp.width,c=document.createElement('canvas');c.width=c.height=n;const g=c.getContext('2d',{willReadFrequently:true});
+    g.drawImage(bmp,0,0);const im=g.getImageData(0,0,n,n),d=im.data;
+    let e=new Float32Array(n*n);for(let i=0;i<n*n;i++)e[i]=d[i*4]*256+d[i*4+1]+d[i*4+2]/256-32768;
+    const px=40075016*Math.cos(25*Math.PI/180)/(256*2**z),thr=80+px*.8,nb=new Float32Array(8);let fixed=0;
+    for(let pass=0;pass<2;pass++){
+      const o=e.slice();
+      for(let y=0;y<n;y++)for(let x=0;x<n;x++){
+        let k=0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dy)continue;const xx=Math.min(n-1,Math.max(0,x+dx)),yy=Math.min(n-1,Math.max(0,y+dy));nb[k++]=e[yy*n+xx]}
+        nb.sort();const med=(nb[3]+nb[4])/2,v=e[y*n+x];
+        if(Math.abs(v-med)>thr||v>4000||v<-1000){o[y*n+x]=med;fixed++}
+      }
+      e=o;
+    }
+    if(!fixed)return buf;
+    for(let i=0;i<n*n;i++){const v=Math.max(-32768,Math.min(32767,e[i]))+32768;d[i*4]=Math.floor(v/256);d[i*4+1]=Math.floor(v)%256;d[i*4+2]=Math.floor((v%1)*256);d[i*4+3]=255}
+    g.putImageData(im,0,0);
+    return await new Promise(r=>c.toBlob(b=>b.arrayBuffer().then(r),'image/png'));
+  }catch(err){return buf}
+}
+maplibregl.addProtocol('cdem',async(params)=>{
+  const m=params.url.match(/cdem:\/\/(\d+)\/(\d+)\/(\d+)/),z=+m[1];
+  const r=await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${m[2]}/${m[3]}.png`);
+  if(!r.ok)throw new Error('dem '+r.status);
+  return {data:await cleanDem(await r.arrayBuffer(),z)};
+});
+
 /* ---------------- ride model ---------------- */
 const R=6371000,rad=Math.PI/180;
 function hav(a,b,c,d){const x=Math.sin((c-a)*rad/2)**2+Math.cos(a*rad)*Math.cos(c*rad)*Math.sin((d-b)*rad/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
@@ -269,8 +299,8 @@ const map=new maplibregl.Map({
   style:{version:8,
     sources:{
       sat:{type:'raster',tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],tileSize:256,maxzoom:18},
-      dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],tileSize:256,maxzoom:14,encoding:'terrarium'},
-      dem2:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],tileSize:256,maxzoom:14,encoding:'terrarium'}
+      dem:{type:'raster-dem',tiles:['cdem://{z}/{x}/{y}'],tileSize:256,maxzoom:14,encoding:'terrarium'},
+      dem2:{type:'raster-dem',tiles:['cdem://{z}/{x}/{y}'],tileSize:256,maxzoom:14,encoding:'terrarium'}
     },
     sky:{'sky-color':'#24406b','horizon-color':'#f2c99a','fog-color':'#d9b48e','sky-horizon-blend':.55,'horizon-fog-blend':.7,'fog-ground-blend':.35,'atmosphere-blend':['interpolate',['linear'],['zoom'],0,1,12,.6,15,.3]},
     layers:[{id:'bg',type:'background',paint:{'background-color':'#1d2630'}},
