@@ -440,16 +440,16 @@ function drawHud(){
   if(state.hud==='cockpit'&&RIDE.hasGears){drawCockpit(s,fb,pad,py);}
   else{
   // stats row
-  const stats=[['時速',cur.v.toFixed(1),'km/h'],['距離',cur.d.toFixed(2),'km'],['海拔',Math.round(cur.alt),'m']];
-  if(RIDE.hasHr)stats.push(['心率',cur.hr||'—','bpm']);
-  if(RIDE.hasPw)stats.push(['功率',Math.round(cur.p3)||'0','W']);
+  const stats=[['時速',cur.v.toFixed(1),'km/h','speed',cur.v],['距離',cur.d.toFixed(2),'km'],['海拔',Math.round(cur.alt),'m']];
+  if(RIDE.hasHr)stats.push(['心率',cur.hr||'—','bpm','hr',cur.hr]);
+  if(RIDE.hasPw)stats.push(['功率',Math.round(cur.p3)||'0','W','power',cur.p3]);
   if(RIDE.hasCad)stats.push(['踏頻',cur.cad||'0','rpm']);
   const narrow=W<640&&stats.length>4,cols=narrow?Math.ceil(stats.length/2):stats.length,cw=pw/cols,sy0=py-14*s,rowH=60*s;
   stats.forEach((st,i)=>{
     const row=narrow?Math.floor(i/cols):0,rows=narrow?Math.ceil(stats.length/cols):1,sy=sy0-(rows-1-row)*rowH;
     const x=pad+(i%cols)*cw;hg.textAlign='left';
     hg.font=`500 ${11.5*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.66)';hg.fillText(st[0],x,sy-44*s);
-    const nf=W<480?.86:1;hg.font=`600 ${(i===0?42:36)*s*nf}px ${FN}`;hg.fillStyle=i===0?'#ffb547':'#fff';
+    const nf=W<480?.86:1;hg.font=`600 ${(i===0?42:36)*s*nf}px ${FN}`;hg.fillStyle=st[3]?zoneColor(st[3],st[4]):'#fff';
     const vs=String(st[1]);hg.fillText(vs,x,sy-6*s);const vw=hg.measureText(vs).width;
     hg.font=`500 ${13*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.7)';hg.fillText(st[2],x+vw+4*s,sy-6*s);
   });
@@ -472,6 +472,15 @@ function gearAt(t){
   return best||G[gearIdx(t)];
 }
 const AMBER='#ff9f2e';
+/* ---------------- number zones: banded colors for speed / heart rate / power ---------------- */
+const ZONES={speed:[5,10,15,20,25,30,35,40,45,50,55,60],hr:[100,120,130,140,150,160,170,180,190],power:[100,130,160,180,200,220,250,300,350,400,450,500,600,700]};
+const ZPAL=['#8fa0b8','#4f8cff','#2fd0e0','#3ddc84','#c8e64a','#ffd23f','#ff9f2e','#ff5a3c','#ff3d8b','#c46bff'];
+function palAt(u){const x=u*(ZPAL.length-1),i=Math.min(ZPAL.length-2,Math.floor(x)),f=x-i;
+  const h=c=>[1,3,5].map(o=>parseInt(c.slice(o,o+2),16)),a=h(ZPAL[i]),b=h(ZPAL[i+1]);
+  return '#'+a.map((v,k)=>Math.round(v+(b[k]-v)*f).toString(16).padStart(2,'0')).join('')}
+const ZCOL={};for(const k in ZONES){const n=ZONES[k].length;ZCOL[k]=Array.from({length:n+1},(_,i)=>palAt(i/n))}
+function zoneColor(kind,v){if(v==null||isNaN(v)||(kind!=='speed'&&!(v>0)))return '#fff';const th=ZONES[kind];let i=0;while(i<th.length&&v>=th[i])i++;return ZCOL[kind][i]}
+
 function segBar(x,y,w,h,n,v,col){const gap=2,sw=(w-gap*(n-1))/n,on=Math.round(Math.max(0,Math.min(1,v))*n);
   for(let i=0;i<n;i++){hg.fillStyle=i<on?col:'rgba(255,255,255,.12)';hg.fillRect(x+i*(sw+gap),y,sw,h)}}
 function readout(x,y,label,val,unit,size,col,bar,s,fb,bw){
@@ -532,14 +541,14 @@ function drawCockpit(s,fb,pad,py){
   const by=py-30*s;
   if(avail>=360*s){
     const bw=Math.min(150*s,avail/3-18*s);
-    readout(pad,by,'速度',v.toFixed(1),'km/h',58,AMBER,v/60,s,fb,bw);
+    readout(pad,by,'速度',v.toFixed(1),'km/h',58,zoneColor('speed',v),v/60,s,fb,bw);
     readout(pad+avail*.4,by,'踏頻',cad,'rpm',44,'#fff',cad/120,s,fb,bw);
-    if(RIDE.hasPw)readout(pad+avail*.7,by,'3 秒功率',p3,'W',44,'#fff',p3/pmax,s,fb,bw);
+    if(RIDE.hasPw)readout(pad+avail*.7,by,'3 秒功率',p3,'W',44,zoneColor('power',p3),p3/pmax,s,fb,bw);
   }else{
     const bw=Math.min(120*s,avail/2-12*s);
-    readout(pad,by-78*s,'速度',v.toFixed(1),'km/h',54,AMBER,v/60,s,fb,Math.min(avail,200*s));
+    readout(pad,by-78*s,'速度',v.toFixed(1),'km/h',54,zoneColor('speed',v),v/60,s,fb,Math.min(avail,200*s));
     readout(pad,by,'踏頻',cad,'rpm',36,'#fff',cad/120,s,fb,bw);
-    if(RIDE.hasPw)readout(pad+avail/2,by,'3 秒功率',p3,'W',36,'#fff',p3/pmax,s,fb,bw);
+    if(RIDE.hasPw)readout(pad+avail/2,by,'3 秒功率',p3,'W',36,zoneColor('power',p3),p3/pmax,s,fb,bw);
   }
 }
 function drawProfile(x,y,w,h,s,fb){
