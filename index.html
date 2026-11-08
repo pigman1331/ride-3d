@@ -57,6 +57,8 @@ input[type=range]{flex:1;min-width:80px;accent-color:var(--amber)}
 label.sm{font-size:12px;color:var(--muted)}
 #title{width:150px}
 #durhint{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:84px}
+#rideSel{max-width:260px}
+#delRide{color:var(--muted)}
 #ccolor{width:38px;height:34px;padding:2px;border:1px solid var(--line);border-radius:6px;background:#1f2731;cursor:pointer}
 #toast{position:absolute;left:50%;top:calc(14px + env(safe-area-inset-top,0px));transform:translateX(-50%);background:rgba(13,17,23,.92);border:1px solid var(--line);padding:8px 14px;border-radius:8px;font-size:13px;z-index:6;max-width:min(90%,520px);text-align:center}
 #drop{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:rgba(13,17,23,.82);border:2px dashed var(--amber);font-size:18px}
@@ -78,6 +80,13 @@ label.sm{font-size:12px;color:var(--muted)}
     <div id="drop" hidden>放開以載入 FIT / GPX 檔</div>
   </div>
   <div id="dock">
+    <div class="grp">
+      <label class="sm" for="rideSel">紀錄</label>
+      <select id="rideSel" aria-label="選擇要播放的紀錄"></select>
+      <button id="open">＋ 新增紀錄</button>
+      <button id="delRide" title="從清單移除這筆紀錄">移除</button>
+      <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
+    </div>
     <div class="grp grow">
       <button id="play" aria-label="播放"><svg viewBox="0 0 16 16"><path id="playicon" d="M4 2l10 6-10 6z" fill="currentColor"/></svg></button>
       <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="播放位置">
@@ -121,8 +130,6 @@ label.sm{font-size:12px;color:var(--muted)}
       <select id="recmode" aria-label="錄製方式"><option value="rt" selected>即時錄製</option><option value="frame">逐格輸出（手機）</option></select>
       <select id="quality" aria-label="影片畫質"><option value="1280">720p</option><option value="1920" selected>1080p</option><option value="2560">1440p</option></select>
       <button id="rec"><span class="dot"></span><span id="rectext">錄成影片</span></button>
-      <button id="open">換檔案</button>
-      <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
     </div>
   </div>
 </div>
@@ -965,7 +972,7 @@ async function finishRec(){
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
 function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.live){setPlaying(false);if(r.mr&&r.mr.state!=='inactive')r.mr.stop();else{state.rec=null;setRecUI(false,'錄成影片');restoreRes(r)}}}
-function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open,#play').forEach(el=>el.disabled=!on)}
+function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open,#delRide,#play').forEach(el=>el.disabled=!on);if(on&&LIB.length)renderLib()}
 
 /* ---------------- UI ---------------- */
 let toastT;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,3800)}
@@ -998,7 +1005,11 @@ ccolorEl.oninput=()=>{state.color=ccolorEl.value;applyLineColor()};
 function syncColorUI(){const o=cmodeEl.querySelector('option[value=power]');o.disabled=!RIDE.hasPw;
   hudEl.querySelector('option[value=cockpit]').disabled=!RIDE.hasGears;if(!RIDE.hasGears&&state.hud==='cockpit'){hudEl.value=state.hud='std'}state.gearShow=null;
   if(!RIDE.hasPw&&state.cmode==='power'){cmodeEl.value=state.cmode='solid';ccolorEl.hidden=false}applyLineColor()}
-const titleEl=document.getElementById('title');state.title=titleEl.value;titleEl.oninput=()=>{state.title=titleEl.value;map.triggerRepaint()};
+const titleEl=document.getElementById('title');state.title=titleEl.value;let titleSave;
+titleEl.oninput=()=>{state.title=titleEl.value;map.triggerRepaint();const e=LIB.find(x=>x.id===curRideId);if(e){e.title=titleEl.value;clearTimeout(titleSave);titleSave=setTimeout(()=>{if(!e.builtin)idb.put(e);renderLib()},600)}};
+document.getElementById('rideSel').onchange=ev=>{if(!state.rec)selectRide(ev.target.value)};
+document.getElementById('delRide').onclick=async()=>{const e=LIB.find(x=>x.id===curRideId);if(!e||e.builtin||state.rec)return;
+  await idb.del(e.id);LIB=LIB.filter(x=>x!==e);const next=LIB.slice().sort((a,b)=>b.start-a.start)[0];selectRide(next.id,true);toast(`已移除：${e.title}`)};
 document.getElementById('rec').onclick=()=>{if(state.rec)stopRec();else startRec()};
 function layout(){
   const v=document.getElementById('aspect').value,fr=document.getElementById('frame'),st=document.getElementById('stage');
@@ -1014,13 +1025,48 @@ const drop=document.getElementById('drop');
 window.addEventListener('dragover',e=>{e.preventDefault();if(!state.rec)drop.hidden=false});
 drop.addEventListener('dragleave',()=>drop.hidden=true);
 window.addEventListener('drop',e=>{e.preventDefault();drop.hidden=true;if(!state.rec)loadFiles([...e.dataTransfer.files])});
+/* ---------------- ride library: rides kept in this browser (IndexedDB), picked from a menu ---------------- */
+const HAS_PACK=false;
+let LIB=[],curRideId=null;
+const idb=(()=>{let p=null;const open=()=>p||(p=new Promise((res,rej)=>{try{const r=indexedDB.open('ride3d',1);r.onupgradeneeded=()=>r.result.createObjectStore('rides',{keyPath:'id'});r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)}catch(e){rej(e)}}));
+  const tx=async(mode,fn)=>{const db=await open();return new Promise((res,rej)=>{const t=db.transaction('rides',mode),st=t.objectStore('rides');const q=fn(st);t.oncomplete=()=>res(q&&q.result);t.onerror=()=>rej(t.error)})};
+  return{all:()=>tx('readonly',s=>s.getAll()).catch(()=>[]),put:r=>tx('readwrite',s=>s.put(r)).catch(()=>null),del:id=>tx('readwrite',s=>s.delete(id)).catch(()=>null)}})();
+function rideLabel(e){const d=new Date(e.start*1000);
+  const ds=d.toLocaleDateString('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit'});
+  return `${ds}  ${e.title}${e.km?`（${e.km.toFixed(1)} km）`:''}`}
+function autoTitle(start){const h=+new Date(start*1000).toLocaleString('en-US',{timeZone:'Asia/Taipei',hour:'numeric',hour12:false})%24;
+  return h<5?'夜騎':h<10?'晨騎':h<14?'午騎':h<17?'午後騎乘':h<21?'晚騎':'夜騎'}
+function renderLib(){const sel=document.getElementById('rideSel');sel.innerHTML='';
+  LIB.slice().sort((a,b)=>b.start-a.start).forEach(e=>{const o=document.createElement('option');o.value=e.id;o.textContent=rideLabel(e)+(e.builtin?'・範例':'');sel.appendChild(o)});
+  sel.value=curRideId;document.getElementById('delRide').disabled=!LIB.find(e=>e.id===curRideId&&!e.builtin)}
+function entrySegs(e){return e.segs.map(s=>cleanSegment(Object.assign(s.rows.map(r=>r.slice()),{gears:s.gears||[]})))}
+function selectRide(id,quiet){
+  const e=LIB.find(x=>x.id===id);if(!e)return;curRideId=id;
+  setRide(buildRide(entrySegs(e)));
+  titleEl.value=state.title=e.title;renderLib();
+  if(HAS_PACK&&!quiet){const [[a,b],[c,d]]=RIDE.bounds;if(a<121.38||c>121.78||b<24.92||d>25.30)toast('這段路線不在內建的衛星底圖範圍內，地圖會以簡化底色顯示。')}
+}
 async function loadFiles(files){
   files=files.filter(f=>/\.(fit|gpx)$/i.test(f.name));if(!files.length){toast('請選擇 .fit 或 .gpx 檔');return}
   try{
-    const segs=[];for(const f of files){const rows=/\.gpx$/i.test(f.name)?parseGPX(await f.text()):parseFIT(await f.arrayBuffer());if(rows.length>1)segs.push(cleanSegment(rows))}
+    const segs=[];
+    for(const f of files){const rows=/\.gpx$/i.test(f.name)?parseGPX(await f.text()):parseFIT(await f.arrayBuffer());
+      if(rows.length>1){cleanSegment(rows);segs.push({rows:rows.map(r=>r.map(v=>v==null?null:Math.round(v*1e6)/1e6)),gears:rows.gears||[],t0:rows[0][0],t1:rows[rows.length-1][0]})}}
     if(!segs.length)throw new Error('檔案裡沒有 GPS 軌跡');
-    setRide(buildRide(segs));
-    toast(`已載入 ${segs.length} 段紀錄`);
+    // same day and less than 3 h apart = one ride (e.g. a ride saved as two files)
+    segs.sort((a,b)=>a.t0-b.t0);const groups=[];
+    const day=t=>new Date(t*1000).toLocaleDateString('en-CA',{timeZone:'Asia/Taipei'});
+    for(const s of segs){const g=groups[groups.length-1];
+      if(g&&day(g[g.length-1].t1)===day(s.t0)&&s.t0-g[g.length-1].t1<3*3600)g.push(s);else groups.push([s])}
+    const added=[];
+    for(const g of groups){
+      const start=g[0].t0,id='r'+start,old=LIB.find(e=>e.id===id);
+      const km=g.reduce((s,x)=>s+(x.rows[x.rows.length-1][4]||0)-(x.rows[0][4]||0),0)/1000;
+      const e={id,start,km,title:old?old.title:autoTitle(start),segs:g.map(x=>({rows:x.rows,gears:x.gears}))};
+      LIB=LIB.filter(x=>x.id!==id);LIB.push(e);await idb.put(e);added.push(e);
+    }
+    selectRide(added[0].id);
+    toast(added.length>1?`已新增 ${added.length} 筆紀錄，可從「紀錄」選單切換`:`已新增紀錄：${added[0].title}${added[0].segs.length>1?`（${added[0].segs.length} 段合併）`:''}`);
   }catch(err){toast('讀取失敗：'+(err.message||'檔案格式不支援'))}
 }
 function setRide(r){RIDE=r;applyDur(document.getElementById('dur').value);setPlaying(false);refreshRoute();syncColorUI();computeOverview();state.T=0;update(0,true);syncUI();
@@ -1029,9 +1075,12 @@ function setRide(r){RIDE=r;applyDur(document.getElementById('dur').value);setPla
 /* ---------------- boot ---------------- */
 (async()=>{
   sizeHud();requestAnimationFrame(frame);
-  const segs=(await (await fetch('rides.json')).json()).map(o=>cleanSegment(Array.isArray(o)?o:Object.assign(o.rows,{gears:o.gears})));
+  const raw=(await (await fetch('rides.json')).json()).map(o=>Array.isArray(o)?{rows:o,gears:[]}:o);
+  const builtin={id:'builtin',builtin:true,start:raw[0].rows[0][0],km:0,title:'晨騎・內湖山區',segs:raw};
+  LIB=[builtin,...(await idb.all())];curRideId='builtin';
+  const segs=entrySegs(builtin);
   await new Promise(r=>map.loaded()?r():map.on('load',r));
-  RIDE=buildRide(segs);applyDur(document.getElementById('dur').value);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
+  RIDE=buildRide(segs);builtin.km=RIDE.dist;renderLib();applyDur(document.getElementById('dur').value);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
   document.getElementById('loadmsg').textContent='準備完成';
   const done=()=>{if(done.x)return;done.x=1;document.getElementById('loading').classList.add('gone');setTimeout(()=>{if(!state.T)setPlaying(true)},500)};
   map.once('idle',done);setTimeout(done,12000);
