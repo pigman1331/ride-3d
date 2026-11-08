@@ -109,6 +109,8 @@ label.sm{font-size:12px;color:var(--muted)}
       <select id="hudmode"><option value="std">標準</option><option value="cockpit">座艙・變速</option></select>
       <label class="sm" for="marker">標記</label>
       <select id="marker"><option value="bike" selected>我的車</option><option value="dot">光點</option></select>
+      <label class="sm" for="hl">亮點</label>
+      <select id="hl"><option value="on" selected>顯示</option><option value="off">關閉</option></select>
     </div>
     <div class="grp">
       <label class="sm hide-sm" for="title">標題</label>
@@ -254,6 +256,8 @@ function buildRide(segs){
   let minLat=90,maxLat=-90,minLng=180,maxLng=-180;
   for(const p of P){minLat=Math.min(minLat,p.lat);maxLat=Math.max(maxLat,p.lat);minLng=Math.min(minLng,p.lng);maxLng=Math.max(maxLng,p.lng)}
   const altMin=Math.min(...P.map(p=>p.alt));
+  // power meter spikes (e.g. 1800 W for one second when pedalling restarts): clamp to neighbours
+  for(let i=0;i<P.length;i++){let m=0;for(let k=-2;k<=2;k++){const q=P[i+k];if(k&&q&&q.seg===P[i].seg)m=Math.max(m,q.pw)}if(P[i].pw>400&&P[i].pw>m*1.6)P[i].pw=m}
   // smoothed values for route coloring (speed ±5 pts, power ±15 pts, within a segment)
   for(let i=0;i<P.length;i++){let sv=0,nv=0,sp=0,np=0;
     for(let k=-15;k<=15;k++){const q=P[i+k];if(!q||q.seg!==P[i].seg)continue;sp+=q.pw;np++;if(k>=-5&&k<=5){sv+=q.v;nv++}}
@@ -274,7 +278,7 @@ function sampleAt(a){
 
 /* ---------------- timeline ---------------- */
 const INTRO=4.5,OUTRO=6,PAUSE=2.6;
-const state={marker:'bike',speedX:0,hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
+const state={hl:true,marker:'bike',speedX:0,hud:'std',gearShow:null,cmode:'solid',color:'#ffb547',dur:60,mode:'seam',T:0,playing:false,last:0,bearing:0,rec:null,title:''};
 function pauses(){return state.mode==='split'?RIDE.segs.slice(0,-1).map(s=>s.a1):[]}
 function total(){return INTRO+state.dur+pauses().length*PAUSE+OUTRO}
 // map timeline T -> {phase, a, pauseIdx}
@@ -575,6 +579,7 @@ function drawHud(){
   // tiny credit (kept in recordings)
   hg.textAlign='right';hg.font=`400 ${9*s}px ${fb}`;hg.fillStyle='rgba(255,255,255,.45)';
   hg.fillText('Imagery © Esri, Maxar, Earthstar Geographics · Terrain © Mapzen / AWS',W-pad,H-6*s);
+  drawHighlights(s,fb);
   if(ph.phase==='outro')drawSummary(s,fb,ph.u);
 }
 
@@ -669,6 +674,82 @@ function drawCockpit(s,fb,pad,py){
     if(RIDE.hasPw)readout(pad+avail/2,by,'3 秒功率',p3,'W',36,zoneColor('power',p3),p3/pmax,s,fb,bw);
   }
 }
+
+/* ---------------- ride highlights: find the story moments and pop a card when the rider reaches them ---------------- */
+function findHighlights(){
+  const P=RIDE.P,H=[],n=P.length;if(n<10)return H;
+  const argmax=f=>{let b=0,bv=-1e9;for(let i=0;i<n;i++){const v=f(P[i]);if(v>bv){bv=v;b=i}}return b};
+  // smoothed altitude for climb detection
+  const sa=P.map((p,i)=>{let s=0,m=0;for(let k=-10;k<=10;k++){const q=P[i+k];if(q&&q.seg===p.seg){s+=q.alt;m++}}return s/m});
+  const k1=argmax(p=>p.alt);H.push({k:k1,icon:'🏔️',title:'最高點',val:`${Math.round(P[k1].alt)} m`,col:'#9fd3ff'});
+  const k2=argmax(p=>p.cv);H.push({k:k2,icon:'⚡',title:'最快速度',val:`${P[k2].cv.toFixed(1)} km/h`,col:'#ffd23f'});
+  if(RIDE.hasPw){const k3=argmax(p=>p.p3);H.push({k:k3,icon:'🔥',title:'最大功率',val:`${Math.round(P[k3].p3)} W`,sub:'3 秒平均',col:'#ff6a2e'})}
+  // longest climb (largest continuous gain, tolerating dips up to 15 m)
+  let best=null;
+  for(let i=0;i<n;){
+    let j=i,top=i;
+    while(j+1<n&&P[j+1].seg===P[i].seg&&sa[j+1]>sa[top]-15){j++;if(sa[j]>sa[top])top=j}
+    const gain=sa[top]-sa[i],dist=(P[top].d-P[i].d)*1000;
+    if(gain>=30&&dist>200&&(!best||gain>best.gain))best={i,top,gain,dist};
+    i=Math.max(i+1,top+1);
+  }
+  if(best){const g=(best.gain/best.dist*100);
+    H.push({k:best.i,icon:'🚴',title:'最長爬坡開始',val:`${(best.dist/1000).toFixed(1)} km · 爬升 ${Math.round(best.gain)} m`,sub:`平均坡度 ${g.toFixed(1)}%`,col:'#5be06a',end:best.top})}
+  // stops: recording gaps / near-zero speed inside a file, and gaps between files
+  const stops=[];
+  for(let i=1;i<n;i++){const dt=P[i].t-P[i-1].t;if(P[i].seg===P[i-1].seg&&dt>=90)stops.push({k:i-1,dur:dt})}
+  for(let i=0;i<n;){if(P[i].v<1.5){let j=i;while(j+1<n&&P[j+1].v<1.5&&P[j+1].seg===P[i].seg)j++;const dur=P[j].t-P[i].t;if(dur>=90)stops.push({k:i,dur});i=j+1}else i++}
+  RIDE.segs.slice(0,-1).forEach((s,i)=>{const dur=RIDE.segs[i+1].t0-s.t1;if(dur>=60)stops.push({k:s.i1,dur})});
+  stops.sort((a,b)=>b.dur-a.dur);const kept=[];
+  for(const s of stops){if(kept.some(q=>Math.abs(P[q.k].d-P[s.k].d)<.3))continue;if(s.dur>=120||kept.length===0)kept.push(s);if(kept.length>=3)break}
+  kept.forEach(s=>H.push({k:s.k,icon:'📍',title:'停留',val:fmtT(s.dur).replace(/^(\d+):(\d+)$/,(m,a,b)=>`${+a} 分 ${+b} 秒`),sub:new Date(P[s.k].t*1000).toLocaleTimeString('zh-TW',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hour12:false})+' 抵達',col:'#c59bff'}));
+  H.sort((a,b)=>P[a.k].a-P[b.k].a);
+  return H;
+}
+let hlCache={key:'',list:[]};
+function highlightTimes(){
+  const key=state.dur+'|'+state.mode+'|'+RIDE.P.length+'|'+RIDE.A;if(hlCache.key===key)return hlCache.list;
+  if(!RIDE.highlights)RIDE.highlights=findHighlights();
+  const list=RIDE.highlights.map(h=>{const a=RIDE.P[h.k].a;let lo=INTRO,hi=total()-OUTRO;
+    for(let i=0;i<40;i++){const m=(lo+hi)/2;const q=phaseAt(m);if(q.phase==='outro'||q.a>=a)hi=m;else lo=m}return{...h,T:hi}});
+  // keep cards from piling up: at least 1.4 s apart
+  for(let i=1;i<list.length;i++)list[i].show=Math.max(list[i].T,(list[i-1].show??list[i-1].T)+1.4);
+  if(list[0])list[0].show=list[0].T;
+  hlCache={key,list};return list;
+}
+const HL_DUR=3.2;
+function drawHighlights(s,fb){
+  if(!state.hl||!RIDE||ph.phase==='intro')return;
+  const list=highlightTimes();let slot=0;
+  for(const h of list){
+    const dt=state.T-h.show;if(dt<0||dt>HL_DUR)continue;
+    const al=Math.min(1,dt/.25,(HL_DUR-dt)/.45),pop=1+.12*Math.max(0,1-dt/.25);
+    const p=RIDE.P[h.k],q=map.project([p.lng,p.lat]);
+    // ground marker at the spot
+    if(q.x>-20&&q.x<W+20&&q.y>-20&&q.y<H+20){
+      hg.globalAlpha=al;hg.beginPath();hg.arc(q.x,q.y,7*s*pop,0,7);hg.fillStyle=h.col;hg.fill();hg.strokeStyle='#fff';hg.lineWidth=2*s;hg.stroke();
+      const r=(dt%1.2)/1.2;hg.beginPath();hg.arc(q.x,q.y,(8+r*18)*s,0,7);hg.strokeStyle=h.col;hg.globalAlpha=al*(1-r);hg.lineWidth=2*s;hg.stroke();hg.globalAlpha=1;
+    }
+    // card: sits above the spot when visible, otherwise under the title block
+    hg.font=`700 ${14*s}px ${fb}`;const tw=hg.measureText(h.title).width;
+    hg.font=`600 ${20*s}px ${FN}`;const vw=hg.measureText(h.val).width;
+    hg.font=`500 ${11*s}px ${fb}`;const sw=h.sub?hg.measureText(h.sub).width:0;
+    const cw=Math.min(W-24*s,46*s+Math.max(tw,vw,sw)+16*s),ch=(h.sub?66:52)*s*pop;
+    let cx,cy;const onScreen=q.x>cw/2&&q.x<W-cw/2&&q.y>ch+60*s&&q.y<H*.72;
+    if(onScreen){cx=q.x-cw/2;cy=q.y-ch-26*s}else{cx=20*s;cy=88*s+slot*(ch+8*s)}
+    cy-=slot*(onScreen?ch+8*s:0);slot++;
+    hg.globalAlpha=al;
+    if(onScreen){hg.beginPath();hg.moveTo(q.x,q.y-9*s);hg.lineTo(q.x,cy+ch);hg.strokeStyle=h.col;hg.lineWidth=1.5*s;hg.stroke()}
+    hg.fillStyle='rgba(10,13,20,.88)';rr(cx,cy,cw,ch,10*s);hg.fill();hg.strokeStyle=h.col;hg.lineWidth=1.5*s;hg.stroke();
+    hg.beginPath();hg.arc(cx+22*s,cy+ch/2,15*s,0,7);hg.fillStyle=h.col;hg.globalAlpha=al*.22;hg.fill();hg.globalAlpha=al;
+    hg.textAlign='center';hg.textBaseline='middle';hg.font=`${17*s}px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif`;hg.fillText(h.icon,cx+22*s,cy+ch/2+1*s);
+    hg.textBaseline='alphabetic';hg.textAlign='left';const tx=cx+44*s;
+    hg.font=`700 ${12.5*s}px ${fb}`;hg.fillStyle=h.col;hg.fillText(h.title,tx,cy+20*s);
+    hg.font=`600 ${20*s}px ${FN}`;hg.fillStyle='#fff';hg.fillText(h.val,tx,cy+41*s);
+    if(h.sub){hg.font=`500 ${11*s}px ${fb}`;hg.fillStyle='rgba(232,237,242,.7)';hg.fillText(h.sub,tx,cy+58*s)}
+    hg.globalAlpha=1;
+  }
+}
 function drawProfile(x,y,w,h,s,fb){
   const P=RIDE.P,D=RIDE.dist,lo=RIDE.altMin,hi=RIDE.maxAlt,span=Math.max(50,hi-lo);
   const X=d=>x+d/D*w,Y=a=>y+h-(a-lo)/span*h*.92;
@@ -689,6 +770,13 @@ function drawProfile(x,y,w,h,s,fb){
   }
   // segment boundaries
   RIDE.segs.slice(0,-1).forEach(sg=>{const xx=X(P[sg.i1].d);hg.setLineDash([3*s,3*s]);hg.strokeStyle='rgba(87,211,230,.8)';hg.lineWidth=1*s;hg.beginPath();hg.moveTo(xx,y);hg.lineTo(xx,y+h);hg.stroke();hg.setLineDash([])});
+  // highlight markers on the profile
+  if(state.hl){if(!RIDE.highlights)RIDE.highlights=findHighlights();
+    hg.textAlign='center';hg.textBaseline='middle';hg.font=`${11*s}px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif`;
+    for(const hh of RIDE.highlights){const p=P[hh.k],xx=X(p.d),yy=Y(p.alt)-11*s,passed=ph.phase!=='intro'&&cur.d>=p.d-1e-6;
+      hg.globalAlpha=passed?1:.45;hg.beginPath();hg.arc(xx,yy,8*s,0,7);hg.fillStyle='rgba(10,13,20,.8)';hg.fill();hg.strokeStyle=hh.col;hg.lineWidth=1.2*s;hg.stroke();
+      hg.fillStyle='#fff';hg.fillText(hh.icon,xx,yy+.5*s)}
+    hg.globalAlpha=1;hg.textBaseline='alphabetic'}
   // axis labels
   hg.font=`500 ${10*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.6)';hg.textAlign='left';
   hg.fillText(Math.round(hi)+' m',x+2,y+9*s);
@@ -894,6 +982,7 @@ function setMode(m){state.mode=m;document.getElementById('m-seam').setAttribute(
 document.getElementById('m-seam').onclick=()=>setMode('seam');
 document.getElementById('m-split').onclick=()=>setMode('split');
 document.getElementById('marker').onchange=e=>{state.marker=e.target.value;drawHud()};
+document.getElementById('hl').onchange=e=>{state.hl=e.target.value==='on';drawHud()};
 const hudEl=document.getElementById('hudmode');hudEl.onchange=()=>{state.hud=hudEl.value;state.gearShow=null;drawHud()};
 const cmodeEl=document.getElementById('cmode'),ccolorEl=document.getElementById('ccolor');
 cmodeEl.onchange=()=>{state.cmode=cmodeEl.value;ccolorEl.hidden=state.cmode!=='solid';applyLineColor()};
