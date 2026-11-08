@@ -119,7 +119,7 @@ label.sm{font-size:12px;color:var(--muted)}
     <div class="grp">
       <label class="sm" for="recmode">影片</label>
       <select id="recmode" aria-label="錄製方式"><option value="rt" selected>即時錄製</option><option value="frame">逐格輸出（手機）</option></select>
-      <select id="quality" aria-label="影片畫質"><option value="1280">720p</option><option value="1920" selected>1080p</option></select>
+      <select id="quality" aria-label="影片畫質"><option value="1280">720p</option><option value="1920" selected>1080p</option><option value="2560">1440p</option></select>
       <button id="rec"><span class="dot"></span><span id="rectext">錄成影片</span></button>
       <button id="open">換檔案</button>
       <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
@@ -879,9 +879,16 @@ function pickMime(){for(const m of['video/mp4;codecs=avc1.640028','video/mp4;cod
 async function startLiveRec(){
   const mime=pickMime();
   if(!mime||!HTMLCanvasElement.prototype.captureStream){toast('這個瀏覽器不支援即時錄製，請改選「逐格輸出」。');return}
-  const mc=map.getCanvas(),cap=+document.getElementById('quality').value,k=Math.min(1,cap/Math.max(mc.width,mc.height));
-  recCanvas=document.createElement('canvas');recCanvas.width=even(mc.width*k);recCanvas.height=even(mc.height*k);recCtx=recCanvas.getContext('2d');
-  setPlaying(false);const rec={rt:true,live:true,cancel:false,chunks:[],mime};state.rec=rec;setRecUI(true,'準備中…');
+  // render the map at the chosen output size (e.g. 1080×1920 for 9:16), not the on-screen size
+  const box=map.getContainer(),cw=box.clientWidth,ch=box.clientHeight,cap=+document.getElementById('quality').value;
+  let ow=cw*cap/Math.max(cw,ch),oh=ch*cap/Math.max(cw,ch);
+  const asp=document.getElementById('aspect').value;
+  if(asp!=='fill'){const [aw,ah]=asp.split(':').map(Number);if(aw>=ah){ow=cap;oh=cap*ah/aw}else{oh=cap;ow=cap*aw/ah}} // exact 1080×1920 etc.
+  ow=even(ow);oh=even(oh);
+  const pr0=map.getPixelRatio(),pr=ow/cw;
+  map.setPixelRatio(pr);hudDprOverride=pr;sizeHud();
+  recCanvas=document.createElement('canvas');recCanvas.width=ow;recCanvas.height=oh;recCtx=recCanvas.getContext('2d');
+  setPlaying(false);const rec={rt:true,live:true,cancel:false,chunks:[],mime,pr0};state.rec=rec;setRecUI(true,'準備中…');
   seek(0);await waitIdle(6000);compose();
   const stream=recCanvas.captureStream(30);
   rec.mr=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:Math.round(recCanvas.width*recCanvas.height*30*.2)});
@@ -889,8 +896,9 @@ async function startLiveRec(){
   rec.mr.onstop=()=>saveLive(rec);rec.mr.start(1000);
   setRecUI(true,'錄影中（停止）');toast('錄影中，播完會自動存檔');lastFrame=performance.now();setPlaying(true);
 }
+function restoreRes(rec){if(rec&&rec.pr0){map.setPixelRatio(rec.pr0);hudDprOverride=null;sizeHud();seek(state.T)}}
 async function saveLive(rec){
-  state.rec=null;setRecUI(false,'錄成影片');
+  state.rec=null;setRecUI(false,'錄成影片');restoreRes(rec);
   if(rec.cancel){toast('已取消錄影');return}
   const isMp4=rec.mime.includes('mp4');let blob=new Blob(rec.chunks,{type:isMp4?'video/mp4':'video/webm'});
   if(isMp4&&window.MP4Box&&window.Mp4Muxer){
@@ -956,7 +964,7 @@ async function finishRec(){
   const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-${state.speedX?state.speedX+'x':state.dur+'s'}.mp4`;
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('影片已下載：'+name)
 }
-function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.live){setPlaying(false);if(r.mr&&r.mr.state!=='inactive')r.mr.stop();else{state.rec=null;setRecUI(false,'錄成影片')}}}
+function stopRec(){const r=state.rec;if(!r)return;r.cancel=true;if(r.live){setPlaying(false);if(r.mr&&r.mr.state!=='inactive')r.mr.stop();else{state.rec=null;setRecUI(false,'錄成影片');restoreRes(r)}}}
 function setDock(on){document.querySelectorAll('#dock select,#dock input,#m-seam,#m-split,#open,#play').forEach(el=>el.disabled=!on)}
 
 /* ---------------- UI ---------------- */
