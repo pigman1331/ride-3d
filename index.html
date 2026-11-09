@@ -603,12 +603,15 @@ function gearAt(t){
 }
 const AMBER='#ff9f2e';
 /* ---------------- number zones: banded colors for speed / heart rate / power ---------------- */
-const ZONES={speed:[5,10,15,20,25,30,35,40,45,50,55,60],hr:[100,120,130,140,150,160,170,180,190],power:[100,130,160,180,200,220,250,300,350,400,450,500,600,700]};
+// heart rate / power follow the rider's Bryton zones (LTHR 174, FTP 200 W); speed uses fixed 5 km/h steps
+const ZONES={speed:[5,10,15,20,25,30,35,40,45,50,55,60],hr:[149,158,165,175,179,182],power:[112,152,182,212,242,302]};
+const BRYTON_ZCOL=['#a3abbd','#4f86f7','#4cd964','#ffcc4d','#ff8a4c','#ff5252','#c065d0']; // Bryton Active zone colours
 const ZPAL=['#3d7bff','#2fc6ff','#2fe0b0','#5be06a','#c8e64a','#ffd23f','#ffa12e','#ff6a2e','#ff2d2d'];
 function palAt(u){const x=u*(ZPAL.length-1),i=Math.min(ZPAL.length-2,Math.floor(x)),f=x-i;
   const h=c=>[1,3,5].map(o=>parseInt(c.slice(o,o+2),16)),a=h(ZPAL[i]),b=h(ZPAL[i+1]);
   return '#'+a.map((v,k)=>Math.round(v+(b[k]-v)*f).toString(16).padStart(2,'0')).join('')}
 const ZCOL={};for(const k in ZONES){const n=ZONES[k].length;ZCOL[k]=Array.from({length:n+1},(_,i)=>palAt(i/n))}
+ZCOL.hr=BRYTON_ZCOL;ZCOL.power=BRYTON_ZCOL;
 function zoneColor(kind,v){if(v==null||isNaN(v)||(kind!=='speed'&&!(v>0)))return '#fff';const th=ZONES[kind];let i=0;while(i<th.length&&v>=th[i])i++;return ZCOL[kind][i]}
 
 function segBar(x,y,w,h,n,v,col){const gap=2,sw=(w-gap*(n-1))/n,on=Math.round(Math.max(0,Math.min(1,v))*n);
