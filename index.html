@@ -130,6 +130,7 @@ label.sm{font-size:12px;color:var(--muted)}
         <span id="vpl-time">0:00</span>
         <button id="vpl-flip" title="把視角轉到另一個鏡頭">前後對調</button>
         <label class="sm"><input type="checkbox" id="vpl-sync" checked> 地圖同步</label>
+        <label class="sm" title="地圖停在目前的大小和方向，只有位置圖標移動；可自己拖曳、縮放地圖"><input type="checkbox" id="vpl-lock"> 固定地圖視角</label>
       </div>
       <p class="vpl-tip">360 影片可以拖曳畫面轉視角、滾輪縮放</p>
     </section>
@@ -476,6 +477,7 @@ function applyCam(c){
   const h=map.getContainer().clientHeight;
   map.jumpTo({center:c.center,zoom:c.zoom,pitch:c.pitch,bearing:c.bearing,padding:{top:h*c.padTop||0,bottom:0,left:0,right:0}});
 }
+function camLocked(){const pl=document.getElementById('vplayer'),ck=document.getElementById('vpl-lock');return !!(pl&&ck&&!pl.hidden&&ck.checked)}
 function lerpCam(a,b,u){return{center:[a.center[0]+(b.center[0]-a.center[0])*u,a.center[1]+(b.center[1]-a.center[1])*u],zoom:a.zoom+(b.zoom-a.zoom)*u,pitch:a.pitch+(b.pitch-a.pitch)*u,bearing:angLerp(a.bearing,b.bearing,u),padTop:(a.padTop||0)+((b.padTop||0)-(a.padTop||0))*u}}
 
 let cur=null,ph=null;
@@ -495,7 +497,7 @@ function update(dt,snap){
     const ov={...overview,bearing:state.bearing+40,padTop:0};
     cam=lerpCam(st,ov,ease(Math.min(1,ph.u*1.4)));
   }else cam={...rideCam(cur,state.bearing),padTop:.32};
-  applyCam(cam);
+  if(!camLocked())applyCam(cam);else map.triggerRepaint();
   setProgress(cur,ph.phase==='intro');
 }
 
@@ -891,7 +893,7 @@ function renderVList(){
     const km=v.k0!=null?RIDE.P[v.k0].d.toFixed(1)+' km':'不在路線上';
     li.innerHTML=`<span class="n">${v.i}</span><span class="nm"></span><span class="km">${km}</span><span class="tm">${fmtClock(v.t0)} 開始 · ${fmtT(v.dur)}　（${v.src}）</span>`;
     li.querySelector('.nm').textContent=v.name;
-    li.onclick=li.onkeydown=ev=>{if(ev.type==='keydown'&&ev.key!=='Enter')return;if(state.rec)return;setPlaying(false);if(v.k0!=null)seek(timeAtPoint(v.k0));openPlayer(v)};
+    li.onclick=li.onkeydown=ev=>{if(ev.type==='keydown'&&ev.key!=='Enter')return;if(state.rec)return;setPlaying(false);openPlayer(v);if(v.k0!=null)seek(timeAtPoint(v.k0))};
     ol.appendChild(li)}
 }
 
@@ -958,6 +960,7 @@ function draw360(on){
     document.getElementById('vpl-time').textContent=`${fmtT(v.currentTime)} / ${fmtT(v.duration)}`;
     // keep the map at the spot the camera was at this moment
     if(document.getElementById('vpl-sync').checked&&VP.clip&&RIDE&&!state.rec&&!state.playing){const k=pointAtTime(VP.clip.t0+v.currentTime);if(k!=null){state.T=timeAtPoint(k);update(0,true);syncUI()}}};
+  document.getElementById('vpl-lock').onchange=e=>{if(!e.target.checked)seek(state.T)}; // unlocking snaps back to the follow camera
   document.getElementById('vpl-flip').onclick=()=>{VP.yaw+=Math.PI};
   document.getElementById('vpl-close').onclick=()=>{v.pause();document.getElementById('vplayer').hidden=true;draw360(false)};
 })();
