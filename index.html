@@ -61,6 +61,23 @@ label.sm{font-size:12px;color:var(--muted)}
 #delRide{color:var(--muted)}
 #ccolor{width:38px;height:34px;padding:2px;border:1px solid var(--line);border-radius:6px;background:#1f2731;cursor:pointer}
 #toast{position:absolute;left:50%;top:calc(14px + env(safe-area-inset-top,0px));transform:translateX(-50%);background:rgba(13,17,23,.92);border:1px solid var(--line);padding:8px 14px;border-radius:8px;font-size:13px;z-index:6;max-width:min(90%,520px);text-align:center}
+#vpanel{position:absolute;top:calc(12px + env(safe-area-inset-top,0px));right:max(12px,env(safe-area-inset-right,0px));bottom:12px;width:min(380px,calc(100% - 24px));z-index:6;display:flex;flex-direction:column;background:rgba(13,17,23,.94);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.vp-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.vp-head b{font-size:14px}#vcount{color:var(--muted);font-size:12px;flex:1}
+#vclose{height:28px;padding:0 9px}
+.vp-tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 12px 4px}
+.vp-tools button{height:30px;font-size:12px;padding:0 9px}
+#voff{width:64px;height:30px;font:inherit;font-size:12px;color:var(--text);background:#1f2731;border:1px solid var(--line);border-radius:6px;padding:0 6px}
+.vp-note{margin:4px 12px 8px;font-size:11.5px;color:var(--muted);line-height:1.5}
+#vlist{list-style:none;margin:0;padding:0 6px 10px;overflow:auto;flex:1;min-height:0}
+#vlist li{display:grid;grid-template-columns:30px 1fr auto;gap:2px 8px;padding:8px 6px;border-radius:6px;cursor:pointer;font-size:12.5px}
+#vlist li:hover,#vlist li:focus-visible{background:#1f2731;outline:none}
+#vlist li.on{background:rgba(255,77,141,.16)}
+#vlist .n{grid-row:span 2;align-self:center;width:24px;height:24px;border-radius:50%;background:#ff4d8d;color:#fff;font-weight:700;font-size:11px;display:grid;place-items:center;font-family:var(--f-num)}
+#vlist li.off .n{background:#4a5566}
+#vlist .nm{font-family:var(--f-num);font-size:13.5px;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#vlist .km{font-family:var(--f-num);color:var(--amber);font-size:14px;text-align:right}
+#vlist .tm{color:var(--muted);grid-column:2/4;font-variant-numeric:tabular-nums}
 #drop{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:rgba(13,17,23,.82);border:2px dashed var(--amber);font-size:18px}
 @media (max-width:640px){#title{width:110px}.hide-sm{display:none}}
 @media (prefers-reduced-motion:reduce){#loading{transition:none}}
@@ -77,7 +94,17 @@ label.sm{font-size:12px;color:var(--muted)}
     </div>
     <div id="loading"><div style="text-align:center"><b>載入地形中</b><span id="loadmsg">衛星影像與騎行紀錄準備中…</span></div></div>
     <div id="toast" hidden></div>
-    <div id="drop" hidden>放開以載入 FIT / GPX 檔</div>
+    <div id="drop" hidden>放開以載入 FIT / GPX 檔或影片</div>
+    <aside id="vpanel" hidden>
+      <div class="vp-head"><b>🎥 影片標記</b><span id="vcount"></span><button id="vclose" aria-label="關閉">✕</button></div>
+      <div class="vp-tools">
+        <button id="vadd">＋ 加入影片</button>
+        <label class="sm" for="voff">相機時差</label><input type="number" id="voff" value="0" step="1" title="相機時間比碼錶快就填負數（秒）"><span class="sm">秒</span>
+        <button id="vcsv">匯出對照表</button><button id="vclear">清除</button>
+      </div>
+      <p class="vp-note">只讀取影片開頭的時間資訊，不上傳、不讀整支影片。點一列可跳到那個位置。</p>
+      <ol id="vlist"></ol>
+    </aside>
   </div>
   <div id="dock">
     <div class="grp">
@@ -85,6 +112,8 @@ label.sm{font-size:12px;color:var(--muted)}
       <select id="rideSel" aria-label="選擇要播放的紀錄"></select>
       <button id="open">＋ 新增紀錄</button>
       <button id="delRide" title="從清單移除這筆紀錄">移除</button>
+      <button id="vidBtn" title="加入 Insta360 等影片，依拍攝時間標在路線上">🎥 影片</button>
+      <input type="file" id="vidFile" accept=".insv,.lrv,.mp4,.mov,video/*" multiple hidden>
       <input type="file" id="file" accept=".fit,.gpx" multiple hidden>
     </div>
     <div class="grp grow">
@@ -586,6 +615,7 @@ function drawHud(){
   // tiny credit (kept in recordings)
   hg.textAlign='right';hg.font=`400 ${9*s}px ${fb}`;hg.fillStyle='rgba(255,255,255,.45)';
   hg.fillText('Imagery © Esri, Maxar, Earthstar Geographics · Terrain © Mapzen / AWS',W-pad,H-6*s);
+  drawVideos(s,fb);
   drawHighlights(s,fb);
   if(ph.phase==='outro')drawSummary(s,fb,ph.u);
 }
@@ -760,6 +790,112 @@ function drawHighlights(s,fb){
     hg.globalAlpha=1;
   }
 }
+
+/* ---------------- video markers: place camera clips on the route by their recording time ---------------- */
+const VCOL='#ff4d8d';let VIDS=[],vidIdx=null;
+async function readBoxes(file){ // walk top-level MP4 boxes with small reads; return moov bytes
+  let off=0;const n=file.size;
+  for(let k=0;k<64&&off+8<=n;k++){
+    const h=new DataView(await file.slice(off,off+16).arrayBuffer());
+    let size=h.getUint32(0),type=String.fromCharCode(h.getUint8(4),h.getUint8(5),h.getUint8(6),h.getUint8(7)),hdr=8;
+    if(size===1){size=Number(h.getBigUint64(8));hdr=16}else if(size===0)size=n-off;
+    if(size<8)break;
+    if(type==='moov')return new DataView(await file.slice(off,off+Math.min(size,64*1024*1024)).arrayBuffer());
+    off+=size;
+  }
+  return null;
+}
+async function videoMeta(file){
+  let t0=null,dur=null,src='';
+  const m=file.name.match(/(20\d{6})_(\d{6})/);   // Insta360 / phone style name = camera local start time
+  if(m){const s=m[1]+m[2];t0=Date.parse(`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}T${s.slice(8,10)}:${s.slice(10,12)}:${s.slice(12,14)}+08:00`)/1000;src='檔名'}
+  try{const mv=await readBoxes(file);
+    if(mv){for(let i=8;i<mv.byteLength-28;i++){
+      if(mv.getUint8(i)===0x6d&&mv.getUint8(i+1)===0x76&&mv.getUint8(i+2)===0x68&&mv.getUint8(i+3)===0x64){ // 'mvhd'
+        const v=mv.getUint8(i+4);let ct,ts,du;
+        if(v===1){ct=Number(mv.getBigUint64(i+8));ts=mv.getUint32(i+24);du=Number(mv.getBigUint64(i+28))}
+        else{ct=mv.getUint32(i+8);ts=mv.getUint32(i+16);du=mv.getUint32(i+20)}
+        if(ts)dur=du/ts;
+        if(t0==null&&ct>2082844800){t0=ct-2082844800;src='檔案內時間'}
+        break}}}
+  }catch(e){}
+  if(t0==null){t0=file.lastModified/1000-(dur||0);src='修改時間'}
+  return{name:file.name,t0,t1:t0+(dur||0),dur:dur||0,src};
+}
+function curEntry(){return LIB.find(x=>x.id===curRideId)}
+async function addVideos(files){
+  files=files.filter(f=>/\.(insv|lrv|mp4|mov)$/i.test(f.name)||/^video\//.test(f.type));if(!files.length)return;
+  const e=curEntry();if(!e)return;e.videos=e.videos||[];toast(`讀取 ${files.length} 個影片的時間資訊…`);
+  for(const f of files){const v=await videoMeta(f);
+    // the same take may come as _00_ / _10_ lens files and an .lrv proxy: keep one per start time
+    const dup=e.videos.find(x=>Math.abs(x.t0-v.t0)<1.5);
+    if(dup){if(/^VID_/.test(v.name)&&!/^VID_/.test(dup.name))Object.assign(dup,v);continue}
+    e.videos.push(v)}
+  e.videos.sort((a,b)=>a.t0-b.t0);await idb.put(e);refreshVideos();openVPanel(true);
+  const inRide=VIDS.filter(v=>v.k0!=null).length;
+  toast(`已加入 ${e.videos.length} 支影片，其中 ${inRide} 支在這趟騎乘時間內`);
+}
+function vOffset(){const e=curEntry();return e&&e.vOff||0}
+function pointAtTime(t){const P=RIDE.P,n=P.length;if(t<P[0].t-60||t>P[n-1].t+60)return null;if(t<=P[0].t)return 0;if(t>=P[n-1].t)return n-1;
+  let lo=0,hi=n-1;while(hi-lo>1){const m=(lo+hi)>>1;if(P[m].t<=t)lo=m;else hi=m}return lo}
+function refreshVideos(){
+  const e=curEntry();const off=vOffset();
+  VIDS=(e&&e.videos||[]).map((v,i)=>{const t0=v.t0+off,t1=Math.max(v.t1,v.t0+1)+off;let k0=pointAtTime(t0),k1=pointAtTime(t1);if(k0==null&&k1!=null&&t0<RIDE.P[0].t)k0=0;if(k1==null&&k0!=null)k1=RIDE.P.length-1;return{...v,i:i+1,t0,t1,k0,k1:k1??k0}});
+  vidIdx=null;
+  const fs=VIDS.filter(v=>v.k0!=null).map(v=>{const c=RIDE.P.slice(v.k0,Math.max(v.k0,v.k1)+1).map(p=>[p.lng,p.lat]);if(c.length<2)c.push(c[0]);return lineFeature(c,0)});
+  const fc={type:'FeatureCollection',features:fs};
+  if(map.getSource('vclips'))map.getSource('vclips').setData(fc);
+  else if(map.getLayer('route-base')){map.addSource('vclips',{type:'geojson',data:fc});
+    map.addLayer({id:'vclips',type:'line',source:'vclips',layout:{'line-join':'round','line-cap':'round'},paint:{'line-color':VCOL,'line-width':7,'line-opacity':.85}},'route-base');
+    map.moveLayer('vclips')}
+  renderVList();drawHud();
+}
+function fmtClock(t){return new Date(t*1000).toLocaleTimeString('zh-TW',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}
+function renderVList(){
+  const ol=document.getElementById('vlist');ol.innerHTML='';const n=VIDS.filter(v=>v.k0!=null).length;
+  document.getElementById('vcount').textContent=VIDS.length?`${n} / ${VIDS.length} 支在這趟路線上`:'';
+  const e=curEntry();document.getElementById('voff').value=e&&e.vOff||0;
+  if(!VIDS.length){const li=document.createElement('li');li.style.cursor='default';li.innerHTML='<span></span><span class="tm" style="grid-column:2/4">還沒有影片。按「＋ 加入影片」或把影片檔拖進畫面（.insv、.lrv、.mp4 都可以）。</span>';ol.appendChild(li);return}
+  for(const v of VIDS){const li=document.createElement('li');li.tabIndex=0;li.className=v.k0==null?'off':'';li.dataset.i=v.i;
+    const km=v.k0!=null?RIDE.P[v.k0].d.toFixed(1)+' km':'不在路線上';
+    li.innerHTML=`<span class="n">${v.i}</span><span class="nm"></span><span class="km">${km}</span><span class="tm">${fmtClock(v.t0)} 開始 · ${fmtT(v.dur)}　（${v.src}）</span>`;
+    li.querySelector('.nm').textContent=v.name;
+    li.onclick=li.onkeydown=ev=>{if(ev.type==='keydown'&&ev.key!=='Enter')return;if(v.k0==null||state.rec)return;setPlaying(false);seek(timeAtPoint(v.k0))};
+    ol.appendChild(li)}
+}
+function timeAtPoint(k){const a=RIDE.P[k].a;let lo=INTRO,hi=total()-OUTRO;for(let i=0;i<40;i++){const m=(lo+hi)/2,q=phaseAt(m);if(q.phase==='outro'||q.a>=a)hi=m;else lo=m}return hi}
+function openVPanel(on){document.getElementById('vpanel').hidden=!on}
+function exportVideoCsv(){
+  const rows=[['編號','檔名','開始(台灣時間)','結束(台灣時間)','長度(秒)','時間來源','開始公里','結束公里','開始緯度','開始經度']];
+  for(const v of VIDS){const a=v.k0!=null?RIDE.P[v.k0]:null,b=v.k1!=null?RIDE.P[v.k1]:null;
+    rows.push([v.i,v.name,new Date(v.t0*1000).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}),new Date(v.t1*1000).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}),Math.round(v.dur),v.src,a?a.d.toFixed(2):'',b?b.d.toFixed(2):'',a?a.lat.toFixed(6):'',a?a.lng.toFixed(6):''])}
+  return '﻿'+rows.map(r=>r.map(x=>/[",\n]/.test(String(x))?`"${String(x).replace(/"/g,'""')}"`:x).join(',')).join('\n');
+}
+function drawVideos(s,fb){
+  if(!VIDS.length||!RIDE)return;
+  // camera pins at clip starts
+  hg.textAlign='center';hg.textBaseline='middle';
+  for(const v of VIDS){if(v.k0==null)continue;const p=RIDE.P[v.k0],q=map.project([p.lng,p.lat]);
+    if(q.x<-10||q.y<-10||q.x>W+10||q.y>H+10)continue;
+    const live=ph.phase!=='intro'&&cur.t>=v.t0&&cur.t<=v.t1;const r=(live?10:7.5)*s;
+    hg.beginPath();hg.arc(q.x,q.y-12*s,r,0,7);hg.fillStyle=VCOL;hg.fill();hg.strokeStyle='#fff';hg.lineWidth=1.4*s;hg.stroke();
+    hg.beginPath();hg.moveTo(q.x,q.y-12*s+r);hg.lineTo(q.x,q.y);hg.strokeStyle=VCOL;hg.stroke();
+    hg.font=`700 ${(live?11:9)*s}px ${FN}`;hg.fillStyle='#fff';hg.fillText(v.i,q.x,q.y-12*s+.5*s)}
+  hg.textBaseline='alphabetic';
+  // "now recording" badge
+  if(ph.phase==='intro')return;
+  const v=VIDS.find(x=>x.k0!=null&&cur.t>=x.t0&&cur.t<=x.t1);
+  const li=document.querySelector('#vlist li.on');if(li&&(!v||li.dataset.i!=v.i))li.classList.remove('on');
+  if(!v)return;const el=document.querySelector(`#vlist li[data-i="${v.i}"]`);if(el&&!el.classList.contains('on'))el.classList.add('on');
+  const txt=`${v.name.replace(/\.(insv|lrv|mp4|mov)$/i,'')}`,sub=`${fmtT(cur.t-v.t0)} / ${fmtT(v.dur)}`;
+  hg.font=`600 ${12*s}px ${FN}`;const tw=Math.max(hg.measureText(txt).width,60*s);
+  const x=20*s,y=(state.cmode!=='solid'?94:76)*s,w=tw+48*s,h=40*s;
+  hg.fillStyle='rgba(10,13,20,.86)';rr(x,y,w,h,8*s);hg.fill();hg.strokeStyle=VCOL;hg.lineWidth=1.4*s;hg.stroke();
+  const blink=Math.floor((hudClock??performance.now())/500)%2;
+  hg.beginPath();hg.arc(x+16*s,y+h/2,5*s,0,7);hg.fillStyle=blink?VCOL:'rgba(255,77,141,.35)';hg.fill();
+  hg.textAlign='left';hg.fillStyle='#fff';hg.fillText(txt,x+30*s,y+17*s);
+  hg.font=`500 ${11*s}px ${FN}`;hg.fillStyle='rgba(232,237,242,.75)';hg.fillText('🎥 '+sub,x+30*s,y+32*s);
+}
 function drawProfile(x,y,w,h,s,fb){
   const P=RIDE.P,D=RIDE.dist,lo=RIDE.altMin,hi=RIDE.maxAlt,span=Math.max(50,hi-lo);
   const X=d=>x+d/D*w,Y=a=>y+h-(a-lo)/span*h*.92;
@@ -780,6 +916,9 @@ function drawProfile(x,y,w,h,s,fb){
   }
   // segment boundaries
   RIDE.segs.slice(0,-1).forEach(sg=>{const xx=X(P[sg.i1].d);hg.setLineDash([3*s,3*s]);hg.strokeStyle='rgba(87,211,230,.8)';hg.lineWidth=1*s;hg.beginPath();hg.moveTo(xx,y);hg.lineTo(xx,y+h);hg.stroke();hg.setLineDash([])});
+  // recorded-video bands on the profile
+  for(const v of VIDS){if(v.k0==null)continue;const x0=X(P[v.k0].d),x1=Math.max(x0+2*s,X(P[v.k1].d));
+    hg.fillStyle='rgba(255,77,141,.32)';hg.fillRect(x0,y,x1-x0,h);hg.fillStyle=VCOL;hg.fillRect(x0,y+h-3*s,x1-x0,3*s)}
   // highlight markers on the profile
   if(state.hl){if(!RIDE.highlights)RIDE.highlights=findHighlights();
     hg.textAlign='center';hg.textBaseline='middle';hg.font=`${11*s}px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif`;
@@ -1027,7 +1166,18 @@ document.getElementById('file').onchange=e=>loadFiles([...e.target.files]);
 const drop=document.getElementById('drop');
 window.addEventListener('dragover',e=>{e.preventDefault();if(!state.rec)drop.hidden=false});
 drop.addEventListener('dragleave',()=>drop.hidden=true);
-window.addEventListener('drop',e=>{e.preventDefault();drop.hidden=true;if(!state.rec)loadFiles([...e.dataTransfer.files])});
+window.addEventListener('drop',e=>{e.preventDefault();drop.hidden=true;if(state.rec)return;const fs=[...e.dataTransfer.files];
+  const v=fs.filter(f=>/\.(insv|lrv|mp4|mov)$/i.test(f.name)),r=fs.filter(f=>/\.(fit|gpx)$/i.test(f.name));
+  if(r.length)loadFiles(r).then(()=>v.length&&addVideos(v));else if(v.length)addVideos(v);else toast('請放入 .fit / .gpx 或影片檔')});
+document.getElementById('vidBtn').onclick=()=>openVPanel(document.getElementById('vpanel').hidden);
+document.getElementById('vclose').onclick=()=>openVPanel(false);
+document.getElementById('vadd').onclick=()=>document.getElementById('vidFile').click();
+document.getElementById('vidFile').onchange=e=>{addVideos([...e.target.files]);e.target.value=''};
+document.getElementById('voff').onchange=async e=>{const en=curEntry();if(!en)return;en.vOff=+e.target.value||0;await idb.put(en);refreshVideos()};
+document.getElementById('vclear').onclick=async()=>{const en=curEntry();if(!en||!(en.videos||[]).length)return;en.videos=[];await idb.put(en);refreshVideos();toast('已清除這趟的影片標記')};
+document.getElementById('vcsv').onclick=async()=>{if(!VIDS.length){toast('還沒有影片');return}
+  const name=`${(state.title||'ride').replace(/[\\/:*?"<>|]/g,'')}-影片對照表.csv`,blob=new Blob([exportVideoCsv()],{type:'text/csv'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000);toast('已下載對照表')};
 /* ---------------- ride library: rides kept in this browser (IndexedDB), picked from a menu ---------------- */
 const HAS_PACK=false;
 let LIB=[],curRideId=null;
@@ -1046,7 +1196,7 @@ function entrySegs(e){return e.segs.map(s=>cleanSegment(Object.assign(s.rows.map
 function selectRide(id,quiet){
   const e=LIB.find(x=>x.id===id);if(!e)return;curRideId=id;
   setRide(buildRide(entrySegs(e)));
-  titleEl.value=state.title=e.title;renderLib();
+  titleEl.value=state.title=e.title;renderLib();refreshVideos();
   if(HAS_PACK&&!quiet){const [[a,b],[c,d]]=RIDE.bounds;if(a<121.38||c>121.78||b<24.92||d>25.30)toast('這段路線不在內建的衛星底圖範圍內，地圖會以簡化底色顯示。')}
 }
 async function loadFiles(files){
@@ -1080,10 +1230,11 @@ function setRide(r){RIDE=r;applyDur(document.getElementById('dur').value);setPla
   sizeHud();requestAnimationFrame(frame);
   const raw=(await (await fetch('rides.json')).json()).map(o=>Array.isArray(o)?{rows:o,gears:[]}:o);
   const builtin={id:'builtin',builtin:true,start:raw[0].rows[0][0],km:0,title:'晨騎・內湖山區',segs:raw};
-  LIB=[builtin,...(await idb.all())];curRideId='builtin';
+  const stored=await idb.all();const sb=stored.find(x=>x.id==='builtin');if(sb){builtin.videos=sb.videos;builtin.vOff=sb.vOff;builtin.title=sb.title||builtin.title}
+  LIB=[builtin,...stored.filter(x=>x.id!=='builtin')];curRideId='builtin';
   const segs=entrySegs(builtin);
   await new Promise(r=>map.loaded()?r():map.on('load',r));
-  RIDE=buildRide(segs);builtin.km=RIDE.dist;renderLib();applyDur(document.getElementById('dur').value);addRouteLayers();syncColorUI();computeOverview();layout();update(0,true);syncUI();
+  RIDE=buildRide(segs);builtin.km=RIDE.dist;renderLib();applyDur(document.getElementById('dur').value);addRouteLayers();refreshVideos();syncColorUI();computeOverview();layout();update(0,true);syncUI();
   document.getElementById('loadmsg').textContent='準備完成';
   const done=()=>{if(done.x)return;done.x=1;document.getElementById('loading').classList.add('gone');setTimeout(()=>{if(!state.T)setPlaying(true)},500)};
   map.once('idle',done);setTimeout(done,12000);
