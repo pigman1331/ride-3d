@@ -78,6 +78,7 @@ label.sm{font-size:12px;color:var(--muted)}
 #vlist .nm{font-family:var(--f-num);font-size:13.5px;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vlist .km{font-family:var(--f-num);color:var(--amber);font-size:14px;text-align:right}
 #vlist .tm{color:var(--muted);grid-column:2/4;font-variant-numeric:tabular-nums}
+#vlist .pl{color:var(--text);font-weight:500}
 #vplayer{position:absolute;left:max(12px,env(safe-area-inset-left,0px));top:calc(12px + env(safe-area-inset-top,0px));width:min(560px,calc(100% - 24px));z-index:7;background:rgba(13,17,23,.96);border:1px solid #ff4d8d;border-radius:10px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.45)}
 .vpl-head{display:flex;align-items:center;gap:8px;padding:8px 10px}
 .vpl-head b{flex:1;font-family:var(--f-num);font-size:14px;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -852,6 +853,20 @@ async function videoMeta(file){
   if(t0==null){t0=file.lastModified/1000-(dur||0);src='修改時間'}
   return{name:file.name,t0,t1:t0+(dur||0),dur:dur||0,src};
 }
+
+/* ---------------- place names: county / township from Ministry of the Interior boundaries (taiwan-atlas, MIT) ---------------- */
+let TOWNS=null,townsLoading=null;
+function loadTowns(){return townsLoading||(townsLoading=fetch(new URL('towns.json',location.href)).then(r=>r.json()).then(j=>{TOWNS=j}).catch(()=>{TOWNS=[]}))}
+function inRing(x,y,r){let c=false;for(let i=0,n=r.length/2,j=n-1;i<n;j=i++){const xi=r[2*i],yi=r[2*i+1],xj=r[2*j],yj=r[2*j+1];if((yi>y)!==(yj>y)&&x<(xj-xi)*(y-yi)/(yj-yi)+xi)c=!c}return c}
+function townAt(lng,lat){
+  if(!TOWNS||!TOWNS.length)return null;let best=null,bd=1e9;
+  for(const t of TOWNS){const b=t.b;
+    if(lng>=b[0]&&lng<=b[2]&&lat>=b[1]&&lat<=b[3]){let c=false;for(const r of t.r)if(inRing(lng,lat,r))c=!c;if(c)return{c:t.c,t:t.t}}
+    // coast / bridges: fall back to the closest township edge within ~3 km
+    if(lng>=b[0]-.03&&lng<=b[2]+.03&&lat>=b[1]-.03&&lat<=b[3]+.03)for(const r of t.r)for(let i=0;i<r.length;i+=2){const d=(r[i]-lng)**2+(r[i+1]-lat)**2;if(d<bd){bd=d;best=t}}}
+  return best&&bd<.0009?{c:best.c,t:best.t}:null;
+}
+function placeOf(k){if(k==null||!RIDE)return null;const p=RIDE.P[k];return townAt(p.lng,p.lat)}
 function curEntry(){return LIB.find(x=>x.id===curRideId)}
 async function addVideos(files){
   files=files.filter(f=>/\.(insv|lrv|mp4|mov)$/i.test(f.name)||/^video\//.test(f.type));if(!files.length)return;
@@ -875,6 +890,7 @@ function refreshVideos(){
   const e=curEntry();const off=vOffset();
   VIDS=(e&&e.videos||[]).map((v,i)=>{const t0=v.t0+off,t1=Math.max(v.t1,v.t0+1)+off;let k0=pointAtTime(t0),k1=pointAtTime(t1);if(k0==null&&k1!=null&&t0<RIDE.P[0].t)k0=0;if(k1==null&&k0!=null)k1=RIDE.P.length-1;return{...v,i:i+1,t0,t1,k0,k1:k1??k0}});
   vidIdx=null;
+  if(!TOWNS){loadTowns().then(()=>refreshVideos())}else for(const v of VIDS){v.place=placeOf(v.k0);v.place1=placeOf(v.k1)}
   const fs=VIDS.filter(v=>v.k0!=null).map(v=>{const c=RIDE.P.slice(v.k0,Math.max(v.k0,v.k1)+1).map(p=>[p.lng,p.lat]);if(c.length<2)c.push(c[0]);return lineFeature(c,0)});
   const fc={type:'FeatureCollection',features:fs};
   if(map.getSource('vclips'))map.getSource('vclips').setData(fc);
@@ -891,7 +907,7 @@ function renderVList(){
   if(!VIDS.length){const li=document.createElement('li');li.style.cursor='default';li.innerHTML='<span></span><span class="tm" style="grid-column:2/4">還沒有影片。按「＋ 加入影片」或把影片檔拖進畫面（.insv、.lrv、.mp4 都可以）。</span>';ol.appendChild(li);return}
   for(const v of VIDS){const li=document.createElement('li');li.tabIndex=0;li.className=v.k0==null?'off':'';li.dataset.i=v.i;
     const km=v.k0!=null?RIDE.P[v.k0].d.toFixed(1)+' km':'不在路線上';
-    li.innerHTML=`<span class="n">${v.i}</span><span class="nm"></span><span class="km">${km}</span><span class="tm">${fmtClock(v.t0)} 開始 · ${fmtT(v.dur)}　（${v.src}）</span>`;
+    li.innerHTML=`<span class="n">${v.i}</span><span class="nm"></span><span class="km">${km}</span><span class="tm">${v.place?`<b class="pl">${v.place.c}${v.place.t}</b> · `:''}${fmtClock(v.t0)} 開始 · ${fmtT(v.dur)}　（${v.src}）</span>`;
     li.querySelector('.nm').textContent=v.name;
     li.onclick=li.onkeydown=ev=>{if(ev.type==='keydown'&&ev.key!=='Enter')return;if(state.rec)return;setPlaying(false);openPlayer(v);if(v.k0!=null)seek(timeAtPoint(v.k0))};
     ol.appendChild(li)}
@@ -903,7 +919,7 @@ function findFiles(clip){for(const d of [0,-1,1,-2,2]){const s=VFILES.get(Math.r
 function vpMsg(html){const m=document.getElementById('vpl-msg');if(html==null){m.hidden=true;return}m.innerHTML=html;m.hidden=false}
 function openPlayer(clip){
   const box=document.getElementById('vplayer'),video=document.getElementById('vpl-video');VP.clip=clip;
-  document.getElementById('vpl-name').textContent=clip.name.replace(/\.(insv|lrv|mp4|mov)$/i,'');box.hidden=false;
+  document.getElementById('vpl-name').textContent=clip.name.replace(/\.(insv|lrv|mp4|mov)$/i,'')+(clip.place?`　${clip.place.c}${clip.place.t}`:'');box.hidden=false;
   const fs=findFiles(clip);video.pause();if(video.src)URL.revokeObjectURL(video.src);video.removeAttribute('src');video.load();
   const file=fs&&(fs.flat||fs.lrv);
   if(!file){vpMsg(fs&&fs.raw?'這支只有原始 .insv（HEVC 雙鏡頭），瀏覽器無法直接播放。<br>請把同資料夾裡同名的 <b>.lrv</b> 檔也加進來（或匯出成 mp4 後加入）。':'這次開啟網頁後還沒加入這支影片的檔案。<br>請按「＋ 加入影片」，選取這支影片的 <b>.lrv</b> 或匯出的 mp4。');draw360(false);return}
@@ -967,9 +983,9 @@ function draw360(on){
 function timeAtPoint(k){const a=RIDE.P[k].a;let lo=INTRO,hi=total()-OUTRO;for(let i=0;i<40;i++){const m=(lo+hi)/2,q=phaseAt(m);if(q.phase==='outro'||q.a>=a)hi=m;else lo=m}return hi}
 function openVPanel(on){document.getElementById('vpanel').hidden=!on}
 function exportVideoCsv(){
-  const rows=[['編號','檔名','開始(台灣時間)','結束(台灣時間)','長度(秒)','時間來源','開始公里','結束公里','開始緯度','開始經度']];
+  const rows=[['編號','檔名','開始(台灣時間)','結束(台灣時間)','長度(秒)','時間來源','縣市','鄉鎮市區','結束地點','開始公里','結束公里','開始緯度','開始經度']];
   for(const v of VIDS){const a=v.k0!=null?RIDE.P[v.k0]:null,b=v.k1!=null?RIDE.P[v.k1]:null;
-    rows.push([v.i,v.name,new Date(v.t0*1000).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}),new Date(v.t1*1000).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}),Math.round(v.dur),v.src,a?a.d.toFixed(2):'',b?b.d.toFixed(2):'',a?a.lat.toFixed(6):'',a?a.lng.toFixed(6):''])}
+    rows.push([v.i,v.name,new Date(v.t0*1000).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}),new Date(v.t1*1000).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}),Math.round(v.dur),v.src,v.place?v.place.c:'',v.place?v.place.t:'',v.place1&&(!v.place||v.place1.t!==v.place.t)?v.place1.c+v.place1.t:'',a?a.d.toFixed(2):'',b?b.d.toFixed(2):'',a?a.lat.toFixed(6):'',a?a.lng.toFixed(6):''])}
   return '﻿'+rows.map(r=>r.map(x=>/[",\n]/.test(String(x))?`"${String(x).replace(/"/g,'""')}"`:x).join(',')).join('\n');
 }
 function drawVideos(s,fb){
@@ -988,7 +1004,7 @@ function drawVideos(s,fb){
   const v=VIDS.find(x=>x.k0!=null&&cur.t>=x.t0&&cur.t<=x.t1);
   const li=document.querySelector('#vlist li.on');if(li&&(!v||li.dataset.i!=v.i))li.classList.remove('on');
   if(!v)return;const el=document.querySelector(`#vlist li[data-i="${v.i}"]`);if(el&&!el.classList.contains('on'))el.classList.add('on');
-  const txt=`${v.name.replace(/\.(insv|lrv|mp4|mov)$/i,'')}`,sub=`${fmtT(cur.t-v.t0)} / ${fmtT(v.dur)}`;
+  const txt=`${v.name.replace(/\.(insv|lrv|mp4|mov)$/i,'')}`,sub=`${fmtT(cur.t-v.t0)} / ${fmtT(v.dur)}${v.place?`　${v.place.c}${v.place.t}`:''}`;
   hg.font=`600 ${12*s}px ${FN}`;const tw=Math.max(hg.measureText(txt).width,60*s);
   const x=20*s,y=(state.cmode!=='solid'?94:76)*s,w=tw+48*s,h=40*s;
   hg.fillStyle='rgba(10,13,20,.86)';rr(x,y,w,h,8*s);hg.fill();hg.strokeStyle=VCOL;hg.lineWidth=1.4*s;hg.stroke();
