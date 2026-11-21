@@ -78,6 +78,21 @@ label.sm{font-size:12px;color:var(--muted)}
 #vlist .nm{font-family:var(--f-num);font-size:13.5px;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vlist .km{font-family:var(--f-num);color:var(--amber);font-size:14px;text-align:right}
 #vlist .tm{color:var(--muted);grid-column:2/4;font-variant-numeric:tabular-nums}
+#vplayer{position:absolute;left:max(12px,env(safe-area-inset-left,0px));top:calc(12px + env(safe-area-inset-top,0px));width:min(560px,calc(100% - 24px));z-index:7;background:rgba(13,17,23,.96);border:1px solid #ff4d8d;border-radius:10px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+.vpl-head{display:flex;align-items:center;gap:8px;padding:8px 10px}
+.vpl-head b{flex:1;font-family:var(--f-num);font-size:14px;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vpl-dot{width:9px;height:9px;border-radius:50%;background:#ff4d8d}
+#vpl-close{height:28px;padding:0 9px}
+.vpl-stage{position:relative;aspect-ratio:16/9;background:#000}
+#vpl-canvas,#vpl-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;touch-action:none}
+#vpl-canvas{cursor:grab}
+#vpl-msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:16px;font-size:13px;color:var(--text);background:rgba(0,0,0,.7);line-height:1.6}
+.vpl-ctl{display:flex;align-items:center;gap:8px;padding:8px 10px;flex-wrap:wrap}
+.vpl-ctl input[type=range]{flex:1;min-width:120px}
+#vpl-play{width:38px;padding:0;justify-content:center}
+#vpl-time{font-family:var(--f-num);font-variant-numeric:tabular-nums;color:var(--muted);min-width:86px}
+.vpl-ctl button{height:30px;font-size:12px}
+.vpl-tip{margin:0 10px 8px;font-size:11px;color:var(--muted)}
 #drop{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:rgba(13,17,23,.82);border:2px dashed var(--amber);font-size:18px}
 @media (max-width:640px){#title{width:110px}.hide-sm{display:none}}
 @media (prefers-reduced-motion:reduce){#loading{transition:none}}
@@ -105,6 +120,19 @@ label.sm{font-size:12px;color:var(--muted)}
       <p class="vp-note">只讀取影片開頭的時間資訊，不上傳、不讀整支影片。點一列可跳到那個位置。</p>
       <ol id="vlist"></ol>
     </aside>
+    <section id="vplayer" hidden aria-label="影片播放">
+      <div class="vpl-head"><span class="vpl-dot"></span><b id="vpl-name"></b><button id="vpl-close" aria-label="關閉">✕</button></div>
+      <div class="vpl-stage"><canvas id="vpl-canvas"></canvas><video id="vpl-video" playsinline muted preload="auto"></video>
+        <div id="vpl-msg" hidden></div></div>
+      <div class="vpl-ctl">
+        <button id="vpl-play" aria-label="播放／暫停">▶</button>
+        <input type="range" id="vpl-seek" min="0" max="1000" value="0" aria-label="影片位置">
+        <span id="vpl-time">0:00</span>
+        <button id="vpl-flip" title="把前後鏡頭對調">前後對調</button>
+        <label class="sm"><input type="checkbox" id="vpl-sync" checked> 地圖同步</label>
+      </div>
+      <p class="vpl-tip">360 影片可以拖曳畫面轉視角、滾輪縮放</p>
+    </section>
   </div>
   <div id="dock">
     <div class="grp">
@@ -792,7 +820,7 @@ function drawHighlights(s,fb){
 }
 
 /* ---------------- video markers: place camera clips on the route by their recording time ---------------- */
-const VCOL='#ff4d8d';let VIDS=[],vidIdx=null;
+const VCOL='#ff4d8d';let VIDS=[],vidIdx=null;const VFILES=new Map(); // start-second -> {lrv, flat, raw} File objects for this session
 async function readBoxes(file){ // walk top-level MP4 boxes with small reads; return moov bytes
   let off=0;const n=file.size;
   for(let k=0;k<64&&off+8<=n;k++){
@@ -827,6 +855,9 @@ async function addVideos(files){
   files=files.filter(f=>/\.(insv|lrv|mp4|mov)$/i.test(f.name)||/^video\//.test(f.type));if(!files.length)return;
   const e=curEntry();if(!e)return;e.videos=e.videos||[];toast(`讀取 ${files.length} 個影片的時間資訊…`);
   for(const f of files){const v=await videoMeta(f);
+    const key=Math.round(v.t0),slot=VFILES.get(key)||{};
+    if(/\.lrv$/i.test(f.name))slot.lrv=f;else if(/\.insv$/i.test(f.name))slot.raw=f;else slot.flat=f;
+    VFILES.set(key,slot);
     // the same take may come as _00_ / _10_ lens files and an .lrv proxy: keep one per start time
     const dup=e.videos.find(x=>Math.abs(x.t0-v.t0)<1.5);
     if(dup){if(/^VID_/.test(v.name)&&!/^VID_/.test(dup.name))Object.assign(dup,v);continue}
@@ -860,9 +891,76 @@ function renderVList(){
     const km=v.k0!=null?RIDE.P[v.k0].d.toFixed(1)+' km':'不在路線上';
     li.innerHTML=`<span class="n">${v.i}</span><span class="nm"></span><span class="km">${km}</span><span class="tm">${fmtClock(v.t0)} 開始 · ${fmtT(v.dur)}　（${v.src}）</span>`;
     li.querySelector('.nm').textContent=v.name;
-    li.onclick=li.onkeydown=ev=>{if(ev.type==='keydown'&&ev.key!=='Enter')return;if(v.k0==null||state.rec)return;setPlaying(false);seek(timeAtPoint(v.k0))};
+    li.onclick=li.onkeydown=ev=>{if(ev.type==='keydown'&&ev.key!=='Enter')return;if(state.rec)return;setPlaying(false);if(v.k0!=null)seek(timeAtPoint(v.k0));openPlayer(v)};
     ol.appendChild(li)}
 }
+
+/* ---------------- clip player: plays the .lrv proxy (dual fisheye) as a draggable 360 view, or a flat mp4 as is ---------------- */
+const VP={v:null,gl:null,prog:null,tex:null,yaw:0,pitch:-.08,fov:1.6,swap:0,fish:false,raf:0,clip:null};
+function findFiles(clip){for(const d of [0,-1,1,-2,2]){const s=VFILES.get(Math.round(clip.t0-vOffset())+d);if(s)return s}return null}
+function vpMsg(html){const m=document.getElementById('vpl-msg');if(html==null){m.hidden=true;return}m.innerHTML=html;m.hidden=false}
+function openPlayer(clip){
+  const box=document.getElementById('vplayer'),video=document.getElementById('vpl-video');VP.clip=clip;
+  document.getElementById('vpl-name').textContent=clip.name.replace(/\.(insv|lrv|mp4|mov)$/i,'');box.hidden=false;
+  const fs=findFiles(clip);video.pause();if(video.src)URL.revokeObjectURL(video.src);video.removeAttribute('src');video.load();
+  const file=fs&&(fs.flat||fs.lrv);
+  if(!file){vpMsg(fs&&fs.raw?'這支只有原始 .insv（HEVC 雙鏡頭），瀏覽器無法直接播放。<br>請把同資料夾裡同名的 <b>.lrv</b> 檔也加進來（或匯出成 mp4 後加入）。':'這次開啟網頁後還沒加入這支影片的檔案。<br>請按「＋ 加入影片」，選取這支影片的 <b>.lrv</b> 或匯出的 mp4。');draw360(false);return}
+  vpMsg(null);
+  VP.fish=/\.lrv$/i.test(file.name)||/\.insv$/i.test(file.name);
+  video.hidden=VP.fish;document.getElementById('vpl-canvas').hidden=!VP.fish;
+  video.src=URL.createObjectURL(file);
+  video.onloadedmetadata=()=>{if(!VP.fish)return;const r=video.videoWidth/video.videoHeight;if(Math.abs(r-2)>.05){VP.fish=false;video.hidden=false;document.getElementById('vpl-canvas').hidden=true}};
+  video.play().catch(()=>{});
+  if(VP.fish)startGL();
+}
+const VS='attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}';
+const FS=`precision highp float;uniform sampler2D t;uniform vec2 res;uniform float yaw,pitch,fov,swap;
+vec2 lens(vec3 d,float c){float th=acos(clamp(d.z,-1.,1.));vec2 dir=d.xy/max(length(d.xy),1e-6);float r=th/radians(100.)*.49;return vec2(c+dir.x*r*.5,.5-dir.y*r);}
+void main(){vec2 q=(gl_FragCoord.xy/res)*2.-1.;q.x*=res.x/res.y;float f=tan(fov*.5);vec3 d=normalize(vec3(q*f,1.));
+ float cp=cos(pitch),sp=sin(pitch);d=vec3(d.x,cp*d.y-sp*d.z,sp*d.y+cp*d.z);float cy=cos(yaw),sy=sin(yaw);d=vec3(cy*d.x+sy*d.z,d.y,-sy*d.x+cy*d.z);
+ float cf=swap>.5?.25:.75,cb=swap>.5?.75:.25;
+ vec4 a=texture2D(t,lens(d,cf)),b=texture2D(t,lens(vec3(-d.x,d.y,-d.z),cb));
+ gl_FragColor=mix(b,a,smoothstep(-.06,.06,d.z));}`;
+function startGL(){
+  const c=document.getElementById('vpl-canvas');
+  if(!VP.gl){const gl=c.getContext('webgl',{preserveDrawingBuffer:false});if(!gl){vpMsg('這個瀏覽器不支援 WebGL，無法展開 360 影片');return}
+    const sh=(type,src)=>{const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s};
+    const pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(pr);gl.useProgram(pr);
+    const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+    const loc=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+    const tx=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tx);
+    for(const [k,v] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,k,v);
+    Object.assign(VP,{gl,prog:pr,tex:tx});
+    // drag to look around, wheel to zoom
+    let drag=null;c.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,yaw:VP.yaw,pitch:VP.pitch};c.setPointerCapture(e.pointerId);c.style.cursor='grabbing'});
+    c.addEventListener('pointermove',e=>{if(!drag)return;const k=VP.fov/c.clientHeight;VP.yaw=drag.yaw-(e.clientX-drag.x)*k;VP.pitch=Math.max(-1.4,Math.min(1.4,drag.pitch+(e.clientY-drag.y)*k))});
+    c.addEventListener('pointerup',()=>{drag=null;c.style.cursor='grab'});
+    c.addEventListener('wheel',e=>{e.preventDefault();VP.fov=Math.max(.6,Math.min(2.4,VP.fov*(1+e.deltaY*.001)))},{passive:false});
+  }
+  cancelAnimationFrame(VP.raf);draw360(true);
+}
+function draw360(on){
+  if(!on){cancelAnimationFrame(VP.raf);return}
+  const gl=VP.gl,c=gl.canvas,v=document.getElementById('vpl-video'),dpr=Math.min(2,devicePixelRatio||1);
+  const w=Math.round(c.clientWidth*dpr),h=Math.round(c.clientHeight*dpr);if(c.width!==w||c.height!==h){c.width=w;c.height=h}
+  gl.viewport(0,0,w,h);
+  if(v.readyState>=2){gl.bindTexture(gl.TEXTURE_2D,VP.tex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,v);
+    const u=n=>gl.getUniformLocation(VP.prog,n);gl.uniform2f(u('res'),w,h);gl.uniform1f(u('yaw'),VP.yaw);gl.uniform1f(u('pitch'),VP.pitch);gl.uniform1f(u('fov'),VP.fov);gl.uniform1f(u('swap'),VP.swap);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4)}
+  VP.raf=requestAnimationFrame(()=>draw360(!document.getElementById('vplayer').hidden&&VP.fish));
+}
+(function initPlayer(){
+  const v=document.getElementById('vpl-video'),seekEl=document.getElementById('vpl-seek'),btn=document.getElementById('vpl-play');
+  btn.onclick=()=>{if(v.paused)v.play().catch(()=>{});else v.pause()};
+  v.onplay=()=>btn.textContent='❚❚';v.onpause=()=>btn.textContent='▶';
+  seekEl.oninput=()=>{if(v.duration)v.currentTime=seekEl.value/1000*v.duration};
+  v.ontimeupdate=()=>{if(!v.duration)return;seekEl.value=Math.round(v.currentTime/v.duration*1000);
+    document.getElementById('vpl-time').textContent=`${fmtT(v.currentTime)} / ${fmtT(v.duration)}`;
+    // keep the map at the spot the camera was at this moment
+    if(document.getElementById('vpl-sync').checked&&VP.clip&&RIDE&&!state.rec&&!state.playing){const k=pointAtTime(VP.clip.t0+v.currentTime);if(k!=null){state.T=timeAtPoint(k);update(0,true);syncUI()}}};
+  document.getElementById('vpl-flip').onclick=()=>{VP.swap=1-VP.swap};
+  document.getElementById('vpl-close').onclick=()=>{v.pause();document.getElementById('vplayer').hidden=true;draw360(false)};
+})();
 function timeAtPoint(k){const a=RIDE.P[k].a;let lo=INTRO,hi=total()-OUTRO;for(let i=0;i<40;i++){const m=(lo+hi)/2,q=phaseAt(m);if(q.phase==='outro'||q.a>=a)hi=m;else lo=m}return hi}
 function openVPanel(on){document.getElementById('vpanel').hidden=!on}
 function exportVideoCsv(){
