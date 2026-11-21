@@ -128,7 +128,7 @@ label.sm{font-size:12px;color:var(--muted)}
         <button id="vpl-play" aria-label="播放／暫停">▶</button>
         <input type="range" id="vpl-seek" min="0" max="1000" value="0" aria-label="影片位置">
         <span id="vpl-time">0:00</span>
-        <button id="vpl-flip" title="把前後鏡頭對調">前後對調</button>
+        <button id="vpl-flip" title="把視角轉到另一個鏡頭">前後對調</button>
         <label class="sm"><input type="checkbox" id="vpl-sync" checked> 地圖同步</label>
       </div>
       <p class="vpl-tip">360 影片可以拖曳畫面轉視角、滾輪縮放</p>
@@ -958,7 +958,7 @@ function draw360(on){
     document.getElementById('vpl-time').textContent=`${fmtT(v.currentTime)} / ${fmtT(v.duration)}`;
     // keep the map at the spot the camera was at this moment
     if(document.getElementById('vpl-sync').checked&&VP.clip&&RIDE&&!state.rec&&!state.playing){const k=pointAtTime(VP.clip.t0+v.currentTime);if(k!=null){state.T=timeAtPoint(k);update(0,true);syncUI()}}};
-  document.getElementById('vpl-flip').onclick=()=>{VP.swap=1-VP.swap};
+  document.getElementById('vpl-flip').onclick=()=>{VP.yaw+=Math.PI};
   document.getElementById('vpl-close').onclick=()=>{v.pause();document.getElementById('vplayer').hidden=true;draw360(false)};
 })();
 function timeAtPoint(k){const a=RIDE.P[k].a;let lo=INTRO,hi=total()-OUTRO;for(let i=0;i<40;i++){const m=(lo+hi)/2,q=phaseAt(m);if(q.phase==='outro'||q.a>=a)hi=m;else lo=m}return hi}
