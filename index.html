@@ -87,6 +87,7 @@ label.sm{font-size:12px;color:var(--muted)}
 .vpl-stage{position:relative;aspect-ratio:16/9;background:#000}
 #vpl-canvas,#vpl-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;touch-action:none}
 #vpl-canvas{cursor:grab}
+#vpl-hud{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 #vpl-msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:16px;font-size:13px;color:var(--text);background:rgba(0,0,0,.7);line-height:1.6}
 .vpl-ctl{display:flex;align-items:center;gap:8px;padding:8px 10px;flex-wrap:wrap}
 .vpl-ctl input[type=range]{flex:1;min-width:120px}
@@ -124,7 +125,7 @@ label.sm{font-size:12px;color:var(--muted)}
     <section id="vplayer" hidden aria-label="影片播放">
       <div class="vpl-head"><span class="vpl-dot"></span><b id="vpl-name"></b><button id="vpl-close" aria-label="關閉">✕</button></div>
       <div class="vpl-stage"><canvas id="vpl-canvas"></canvas><video id="vpl-video" playsinline muted preload="auto"></video>
-        <div id="vpl-msg" hidden></div></div>
+        <canvas id="vpl-hud" aria-hidden="true"></canvas><div id="vpl-msg" hidden></div></div>
       <div class="vpl-ctl">
         <button id="vpl-play" aria-label="播放／暫停">▶</button>
         <input type="range" id="vpl-seek" min="0" max="1000" value="0" aria-label="影片位置">
@@ -132,6 +133,7 @@ label.sm{font-size:12px;color:var(--muted)}
         <button id="vpl-flip" title="把視角轉到另一個鏡頭">前後對調</button>
         <label class="sm"><input type="checkbox" id="vpl-sync" checked> 地圖同步</label>
         <label class="sm" title="地圖停在目前的大小和方向，只有位置圖標移動；可自己拖曳、縮放地圖"><input type="checkbox" id="vpl-lock"> 固定地圖視角</label>
+        <label class="sm" title="把當下的速度、心率、功率等數據疊在影片上"><input type="checkbox" id="vpl-data" checked> 顯示騎行資訊</label>
       </div>
       <p class="vpl-tip">360 影片可以拖曳畫面轉視角、滾輪縮放</p>
     </section>
@@ -917,6 +919,47 @@ function renderVList(){
 const VP={v:null,gl:null,prog:null,tex:null,yaw:0,pitch:-.08,fov:1.6,swap:0,fish:false,raf:0,clip:null};
 function findFiles(clip){for(const d of [0,-1,1,-2,2]){const s=VFILES.get(Math.round(clip.t0-vOffset())+d);if(s)return s}return null}
 function vpMsg(html){const m=document.getElementById('vpl-msg');if(html==null){m.hidden=true;return}m.innerHTML=html;m.hidden=false}
+
+/* ---------------- ride data overlay on the clip player ---------------- */
+function rideAtTime(t){ // interpolated ride values at an absolute time (seconds)
+  if(!RIDE)return null;const P=RIDE.P,k=pointAtTime(t);if(k==null)return null;
+  const p=P[k],q=P[k+1];let f=0;if(q&&q.seg===p.seg&&q.t>p.t)f=Math.max(0,Math.min(1,(t-p.t)/(q.t-p.t)));
+  const L=key=>q&&f?p[key]+(q[key]-p[key])*f:p[key];
+  return{t,k,lng:L('lng'),lat:L('lat'),alt:L('alt'),d:L('d'),v:L('cv')||L('v'),hr:Math.round(L('hr')),p3:Math.round(L('p3')||0),cad:Math.round(L('cad')),
+    gear:RIDE.hasGears?RIDE.gears[gearIdx(t)]:null,place:townAt(L('lng'),L('lat'))};
+}
+function drawPlayerHud(){
+  const c=document.getElementById('vpl-hud'),v=document.getElementById('vpl-video'),on=document.getElementById('vpl-data').checked;
+  const dpr=Math.min(2,devicePixelRatio||1),W2=c.clientWidth,H2=c.clientHeight;
+  if(c.width!==Math.round(W2*dpr)||c.height!==Math.round(H2*dpr)){c.width=Math.round(W2*dpr);c.height=Math.round(H2*dpr)}
+  const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W2,H2);
+  if(!on||!VP.clip||!RIDE||!document.getElementById('vpl-msg').hidden)return;
+  const r=rideAtTime(VP.clip.t0+(v.currentTime||0));if(!r)return;
+  const s=W2/560,pad=12*s,fb=FB();
+  // legibility bands
+  let gr=g.createLinearGradient(0,0,0,H2*.22);gr.addColorStop(0,'rgba(0,0,0,.55)');gr.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=gr;g.fillRect(0,0,W2,H2*.22);
+  gr=g.createLinearGradient(0,H2*.6,0,H2);gr.addColorStop(0,'rgba(0,0,0,0)');gr.addColorStop(1,'rgba(0,0,0,.7)');g.fillStyle=gr;g.fillRect(0,H2*.6,W2,H2*.4);
+  // top: time + place / distance + altitude
+  g.textBaseline='alphabetic';g.textAlign='left';g.fillStyle='#fff';g.font=`600 ${20*s}px ${FN}`;
+  g.fillText(new Date(r.t*1000).toLocaleTimeString('zh-TW',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}),pad,pad+16*s);
+  if(r.place){g.font=`500 ${12*s}px ${fb}`;g.fillStyle='rgba(255,255,255,.85)';g.fillText(`${r.place.c}${r.place.t}`,pad,pad+33*s)}
+  g.textAlign='right';g.font=`600 ${18*s}px ${FN}`;g.fillStyle='#fff';g.fillText(`${r.d.toFixed(1)} km`,W2-pad,pad+15*s);
+  g.font=`500 ${13*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.85)';g.fillText(`海拔 ${Math.round(r.alt)} m`,W2-pad,pad+32*s);
+  // bottom: speed big + hr / power / cadence
+  const by=H2-pad-4*s;g.textAlign='left';
+  g.font=`600 ${44*s}px ${FN}`;g.fillStyle=zoneColor('speed',r.v);const sv=r.v.toFixed(1);g.fillText(sv,pad,by);
+  let x=pad+g.measureText(sv).width+4*s;g.font=`500 ${13*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.8)';g.fillText('km/h',x,by);x+=40*s;
+  const items=[];if(RIDE.hasHr)items.push(['心率',r.hr||'—','bpm',zoneColor('hr',r.hr)]);
+  if(RIDE.hasPw)items.push(['3秒功率',r.p3,'W',zoneColor('power',r.p3)]);if(RIDE.hasCad)items.push(['踏頻',r.cad,'rpm','#fff']);
+  for(const [lab,val,unit,col] of items){
+    g.font=`500 ${10.5*s}px ${fb}`;g.fillStyle='rgba(255,255,255,.7)';g.fillText(lab,x,by-24*s);const lw=g.measureText(lab).width;
+    g.font=`600 ${24*s}px ${FN}`;g.fillStyle=col;const vs=String(val);g.fillText(vs,x,by);const w=g.measureText(vs).width;
+    g.font=`500 ${11*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.75)';g.fillText(unit,x+w+3*s,by);x+=Math.max(lw,w+3*s+g.measureText(unit).width)+18*s}
+  // gear (Di2)
+  if(r.gear){g.textAlign='right';g.font=`500 ${10.5*s}px ${fb}`;g.fillStyle='rgba(255,255,255,.7)';g.fillText('檔位',W2-pad,by-24*s);
+    g.font=`700 ${24*s}px ${FN}`;g.fillStyle='#ff9f2e';g.fillText(`${r.gear[2]}×${r.gear[4]}`,W2-pad,by)}
+}
+(function hudLoop(){if(!document.getElementById('vplayer').hidden)drawPlayerHud();requestAnimationFrame(hudLoop)})();
 function openPlayer(clip){
   const box=document.getElementById('vplayer'),video=document.getElementById('vpl-video');VP.clip=clip;
   document.getElementById('vpl-name').textContent=clip.name.replace(/\.(insv|lrv|mp4|mov)$/i,'')+(clip.place?`　${clip.place.c}${clip.place.t}`:'');box.hidden=false;
