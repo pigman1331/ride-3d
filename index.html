@@ -947,14 +947,21 @@ function drawPlayerHud(){
   g.font=`500 ${13*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.85)';g.fillText(`海拔 ${Math.round(r.alt)} m`,W2-pad,pad+32*s);
   // bottom: speed big + hr / power / cadence
   const by=H2-pad-4*s;g.textAlign='left';
-  g.font=`600 ${44*s}px ${FN}`;g.fillStyle=zoneColor('speed',r.v);const sv=r.v.toFixed(1);g.fillText(sv,pad,by);
-  let x=pad+g.measureText(sv).width+4*s;g.font=`500 ${13*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.8)';g.fillText('km/h',x,by);x+=40*s;
+  // fixed slots: numbers are right-aligned inside a box sized for the widest value, so units and labels never move
+  g.font=`600 ${44*s}px ${FN}`;const spW=g.measureText('88.8').width;
+  g.textAlign='right';g.fillStyle=zoneColor('speed',r.v);g.fillText(r.v.toFixed(1),pad+spW,by);
+  g.textAlign='left';g.font=`500 ${13*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.8)';g.fillText('km/h',pad+spW+4*s,by);
+  let x=pad+spW+4*s+g.measureText('km/h').width+22*s;
   const items=[];if(RIDE.hasHr)items.push(['心率',r.hr||'—','bpm',zoneColor('hr',r.hr)]);
   if(RIDE.hasPw)items.push(['3秒功率',r.p3,'W',zoneColor('power',r.p3)]);if(RIDE.hasCad)items.push(['踏頻',r.cad,'rpm','#fff']);
   for(const [lab,val,unit,col] of items){
-    g.font=`500 ${10.5*s}px ${fb}`;g.fillStyle='rgba(255,255,255,.7)';g.fillText(lab,x,by-24*s);const lw=g.measureText(lab).width;
-    g.font=`600 ${24*s}px ${FN}`;g.fillStyle=col;const vs=String(val);g.fillText(vs,x,by);const w=g.measureText(vs).width;
-    g.font=`500 ${11*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.75)';g.fillText(unit,x+w+3*s,by);x+=Math.max(lw,w+3*s+g.measureText(unit).width)+18*s}
+    g.font=`600 ${24*s}px ${FN}`;const vw=g.measureText('888').width;
+    g.font=`500 ${11*s}px ${FN}`;const uw=g.measureText(unit).width;
+    g.font=`500 ${10.5*s}px ${fb}`;const lw=g.measureText(lab).width;
+    g.textAlign='left';g.fillStyle='rgba(255,255,255,.7)';g.fillText(lab,x,by-24*s);
+    g.textAlign='right';g.font=`600 ${24*s}px ${FN}`;g.fillStyle=col;g.fillText(String(val),x+vw,by);
+    g.textAlign='left';g.font=`500 ${11*s}px ${FN}`;g.fillStyle='rgba(255,255,255,.75)';g.fillText(unit,x+vw+3*s,by);
+    x+=Math.max(lw,vw+3*s+uw)+18*s}
   // gear (Di2)
   if(r.gear){g.textAlign='right';g.font=`500 ${10.5*s}px ${fb}`;g.fillStyle='rgba(255,255,255,.7)';g.fillText('檔位',W2-pad,by-24*s);
     g.font=`700 ${24*s}px ${FN}`;g.fillStyle='#ff9f2e';g.fillText(`${r.gear[2]}×${r.gear[4]}`,W2-pad,by)}
